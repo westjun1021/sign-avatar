@@ -11,6 +11,7 @@
   "dependencies": {
     "@mediapipe/holistic": "^0.5.1675471629",
     "@pixiv/three-vrm": "^3.5.5",
+    "fix-webm-duration": "^1.0.6",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "three": "^0.160.0"

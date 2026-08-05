@@ -70,12 +70,16 @@ body {
 .stage { position: absolute; inset: 0; }
 .stage canvas { display: block; }
 
-/* 무대 우상단 "정면으로" 버튼 */
-.reset-view {
+/* 무대 우상단 도구 버튼들 ("정면으로" / 녹화) */
+.stage-tools {
   position: absolute;
   top: 12px;
   right: 12px;
   z-index: 2;
+  display: flex;
+  gap: 8px;
+}
+.tool-btn {
   padding: 7px 13px;
   font-size: 12px;
   font-weight: 500;
@@ -84,7 +88,25 @@ body {
   border: 1px solid var(--line);
   backdrop-filter: blur(4px);
 }
-.reset-view:hover { border-color: var(--accent); color: var(--accent); }
+.tool-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.tool-btn:disabled { opacity: 0.45; }
+/* 녹화 중: 빨간 표시 */
+.tool-btn.record.on { color: var(--danger); border-color: var(--danger); }
+.tool-btn.record.on:hover { color: var(--danger); border-color: var(--danger); filter: brightness(1.15); }
+
+.record-error {
+  position: absolute;
+  top: 50px;
+  right: 12px;
+  z-index: 2;
+  max-width: 280px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--danger);
+  background: rgba(20, 26, 36, 0.9);
+  border: 1px solid var(--line);
+}
 
 /* 시작/오류 오버레이 */
 .overlay {
@@ -119,6 +141,11 @@ button {
 button:hover { filter: brightness(1.08); }
 button:disabled { opacity: 0.6; cursor: default; }
 button.stop { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); width: 100%; }
+button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+button.secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+/* 시작 화면 소스 선택 버튼 (웹캠 / 영상 파일) */
+.source-buttons { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 
 /* 사이드 */
 .side { display: flex; flex-direction: column; gap: 14px; min-height: 0; }

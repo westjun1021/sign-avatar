@@ -36,13 +36,30 @@ const SPINE_RATIO = 0.55; // 척추 길이 = 어깨 너비 * 이 값
 const LAYER_AVATAR = 0;
 const LAYER_SKELETON = 1;
 
-// 메인 카메라(아바타 프레이밍) — 기존 값 그대로
-const FRAME_Y = -0.1;
-const FRAME_Z = 2.8;
+// 메인 카메라(아바타 프레이밍) — 뉴스 수어 통역사처럼 머리~허리 흉상만 크게.
+// 이 모델의 실측 본 위치(VRM_POS.y -2.0 / VRM_SCALE 1.7 적용 후):
+//   머리끝 1.00  head 0.64  neck 0.48  upperChest 0.24  spine -0.18  hips -0.28
+//   무릎 -1.01  발 -2.00
+// fov 45 에서 z=2.05 → 세로 반높이 0.85, 화면 y 범위 -0.50~1.20.
+//   머리 위 0.20 여백 / 아래는 골반보다 0.22 더 내려간 지점에서 잘림 → 다리는 화면 밖.
+//   흉상(머리끝~골반)이 화면 세로의 약 75% 를 채운다.
+// 타깃 y 0.35 는 흉상의 세로 중심이라 아바타가 화면 중앙에 온다.
+// 더 당기려면 FRAME_Z 를 줄이고, 손이 좌우로 잘리면 다시 키우면 된다.
+const FRAME_Y = 0.35;
+const FRAME_Z = 2.05;
 
 // 디버그 카메라(스켈레톤) — 손을 위아래로 크게 뻗어도 안 잘리게 더 넓게 잡는다
 const DEBUG_FRAME_Y = -0.35;
 const DEBUG_FRAME_Z = 3.6;
+
+// 녹화(C-1) 관련.
+// preserveDrawingBuffer 는 성능에 약간 손해지만, 없으면 captureStream 이
+// 간헐적으로 검은 프레임을 집는다. 녹화를 안 쓸 거면 false 로 되돌리면 된다.
+const PRESERVE_DRAWING_BUFFER = true;
+// 메인 캔버스는 투명이면 녹화 파일에서 검게 찍힌다(mp4 는 알파가 없다).
+// 그래서 메인 렌더러만 불투명 배경으로 지운다. 디버그 창은 투명 유지.
+// null 로 두면 예전처럼 투명해지고, 대신 .stage-wrap 의 CSS 그라데이션이 보인다.
+const MAIN_CLEAR_COLOR = 0x111825;
 
 // 몸통 중심(원점)이 아직 없을 때 쓰는 기본값 = 화면 중앙
 const DEFAULT_ORIGIN = { x: 0.5, y: 0.5, z: 0 };
@@ -82,6 +99,16 @@ const SMOOTH_FINGER = 0.4; // 손가락은 작고 빨라서 팔보다 조금 높
 const DIR_SMOOTH_ARM = 0.4;
 const DIR_SMOOTH_WRIST = 0.4;
 const DIR_SMOOTH_FINGER = 0.4;
+
+// [신뢰도 게이팅] MediaPipe pose 랜드마크에는 점마다 visibility(0~1) 가 있다.
+// 가려지면 값이 떨어지는데, 그 상태의 좌표는 추측값이라 팔·손이 튄다.
+// 임계 미만이면 그 본을 이번 프레임에 갱신하지 않고 "마지막 신뢰 목표"로만 수렴시킨다.
+// (rest 로 리셋하는 게 아니라 마지막 신뢰 자세에서 부드럽게 멈춘다)
+// 너무 높으면 정상 동작도 자주 멈춰 뻣뻣하고, 너무 낮으면 게이팅 효과가 없다.
+// 손 랜드마크(21점)에는 visibility 가 없어서 게이팅되지 않는다 — 대신 pose 손목으로 막는다.
+const VIS_GATING = true;
+const VIS_THRESHOLD = 0.5;
+const VIS_DEBUG = false; // true 면 60프레임마다 관절별 visibility 를 콘솔에 찍는다
 
 // [z(깊이) 기여도] 방향 벡터의 z 성분에만 곱한다.
 // MediaPipe 의 z 는 단일 웹캠 추정이라 앞뒤 펄럭임의 주원인이다.
@@ -176,6 +203,15 @@ const FINGER_CHAINS = [
 // x: 0(왼)~1(오), y: 0(위)~1(아래), z: 상대 깊이(음수=카메라에 가까움)
 // origin: 이번 프레임의 "몸통 중심". 모든 좌표에서 빼서 아바타를 화면 중앙에 고정한다.
 // mirror=true 면 거울처럼 좌우 반전(통역사가 나를 마주보는 느낌)
+// 이 랜드마크를 리타깃에 써도 되는지.
+// visibility 가 없는 랜드마크(손 21점)는 잴 수 없으니 통과시킨다.
+function isVisible(lm) {
+  if (!lm) return false;
+  if (!VIS_GATING) return true;
+  const v = lm.visibility;
+  return v == null || v >= VIS_THRESHOLD;
+}
+
 function place(target, lm, mirror, origin) {
   const dx = lm.x - origin.x;
   const dy = lm.y - origin.y;
@@ -219,6 +255,10 @@ export class SkeletonAvatar {
     // 팔 4 + 손목 4(양손 f/l) + 손가락 30 정도가 들어간다.
     // 첫 유효 방향은 스냅해서, 0 에서 미끄러져 들어오는 게 안 보이게 한다.
     this._dirSlots = new Map();
+    // 본별 "마지막으로 신뢰할 수 있었던 목표 회전". 신뢰도가 떨어진 프레임에는
+    // 새 목표를 만들지 않고 이 값으로만 계속 수렴시킨다.
+    this._boneTargets = new Map();
+    this._visLogCount = 0;
     // 성능 계측 누적기 (PERF_LOG 가 false 면 쓰이지 않는다)
     this._perfAcc = Object.fromEntries(PERF_KEYS.map((k) => [k, 0]));
     this._perfCount = 0;
@@ -241,9 +281,14 @@ export class SkeletonAvatar {
     this.scene = new THREE.Scene();
 
     // --- 메인 렌더러/카메라: VRM 아바타만 (레이어 0) ---
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: PRESERVE_DRAWING_BUFFER, // 녹화 시 검은 프레임 방지
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h);
+    if (MAIN_CLEAR_COLOR !== null) this.renderer.setClearColor(MAIN_CLEAR_COLOR, 1);
     mainContainer.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
@@ -533,10 +578,12 @@ export class SkeletonAvatar {
     this._updateVrmArms(lm.pose, mirror);
     this._perfMark('arms');
     // 손목 → 손가락 순서. 손가락의 부모(손)가 먼저 최신이어야 한다.
-    this._updateVrmWrists(lm.leftHand, lm.rightHand, mirror);
+    // pose 를 같이 넘기는 건 손목 visibility 로 손 전체를 게이팅하기 위해서다.
+    this._updateVrmWrists(lm.leftHand, lm.rightHand, lm.pose, mirror);
     this._perfMark('wrist');
-    this._updateVrmFingers(lm.leftHand, lm.rightHand, mirror);
+    this._updateVrmFingers(lm.leftHand, lm.rightHand, lm.pose, mirror);
     this._perfMark('fingers');
+    if (VIS_DEBUG) this._logVisibility(lm.pose);
     this._updateVrmMouth(lm.face);
     this._updateVrmEyes(lm.face);
     this._updateVrmBrows(lm.face);
@@ -807,12 +854,22 @@ export class SkeletonAvatar {
   // 방향 하나만 맞추는 setFromUnitVectors 로는 twist 가 결정되지 않으므로,
   // 손바닥 평면에서 3축 basis 를 만들어 회전을 통째로 지정한다.
   // 팔 뒤 / 손가락 앞에 불려야 한다.
-  _updateVrmWrists(leftHand, rightHand, mirror) {
+  _updateVrmWrists(leftHand, rightHand, pose, mirror) {
     if (!this.vrm) return;
     const humanoid = this.vrm.humanoid;
     if (!humanoid) return;
-    this._applyWrist(humanoid, leftHand, mirror ? 'right' : 'left', mirror);
-    this._applyWrist(humanoid, rightHand, mirror ? 'left' : 'right', mirror);
+    this._applyWrist(humanoid, leftHand, mirror ? 'right' : 'left', mirror,
+      this._handTrusted(pose, POSE.LEFT_WRIST));
+    this._applyWrist(humanoid, rightHand, mirror ? 'left' : 'right', mirror,
+      this._handTrusted(pose, POSE.RIGHT_WRIST));
+  }
+
+  // 손 랜드마크에는 visibility 가 없다. 팔이 가려지면 손 좌표도 못 믿으므로
+  // pose 쪽 손목 신뢰도로 그 손 전체(손목 + 손가락)를 막는다.
+  // pose 자체가 없으면(손만 잡힌 경우) 막지 않는다.
+  _handTrusted(pose, wristIdx) {
+    if (!VIS_GATING || !pose) return true;
+    return isVisible(pose[wristIdx]);
   }
 
   // f(손목→중지뿌리)와 l(검지뿌리→새끼뿌리)로 직교정규 basis 를 만든다.
@@ -829,8 +886,12 @@ export class SkeletonAvatar {
     return true;
   }
 
-  _applyWrist(humanoid, hand, side, mirror) {
+  _applyWrist(humanoid, hand, side, mirror, trusted) {
     if (!hand) return;
+    if (!trusted) {
+      this._coastBone(humanoid, `${side}Hand`, SMOOTH_WRIST);
+      return;
+    }
     const bone = humanoid.getNormalizedBoneNode(`${side}Hand`);
     const mid = humanoid.getNormalizedBoneNode(`${side}MiddleProximal`);
     const idx = humanoid.getNormalizedBoneNode(`${side}IndexProximal`);
@@ -877,31 +938,40 @@ export class SkeletonAvatar {
     //   parentQ * (qLocal * qRest) = qTarget  →  qLocal = parentQ⁻¹ · qTarget · qRest⁻¹
     bone.parent.getWorldQuaternion(this._armQ);
     this._wTargetQ.premultiply(this._armQ.invert()).multiply(this._wRestQ.invert());
+    this._rememberTarget(`${side}Hand`, this._wTargetQ);
     bone.quaternion.slerp(this._wTargetQ, SMOOTH_WRIST);
   }
 
   // VRM 손가락을 손 랜드마크(21점)에 맞춰 굽힌다.
   // 팔을 먼저 적용한 뒤에 불려야 한다 — 손가락의 부모(손/아래팔)가 이미 회전돼 있어야
   // 부모 회전 제거가 최신 값으로 이뤄진다.
-  _updateVrmFingers(leftHand, rightHand, mirror) {
+  _updateVrmFingers(leftHand, rightHand, pose, mirror) {
     if (!this.vrm) return;
     const humanoid = this.vrm.humanoid;
     if (!humanoid) return;
     // 팔과 같은 규칙: 사람의 왼손은 거울 모드에서 화면 왼쪽 = 캐릭터의 오른손
-    this._applyHand(humanoid, leftHand, mirror ? 'right' : 'left', mirror);
-    this._applyHand(humanoid, rightHand, mirror ? 'left' : 'right', mirror);
+    this._applyHand(humanoid, leftHand, mirror ? 'right' : 'left', mirror,
+      this._handTrusted(pose, POSE.LEFT_WRIST));
+    this._applyHand(humanoid, rightHand, mirror ? 'left' : 'right', mirror,
+      this._handTrusted(pose, POSE.RIGHT_WRIST));
   }
 
   // 손 하나. 손이 안 잡히면 그 손 손가락 전체를 건너뛰고 직전 각도를 유지한다.
-  _applyHand(humanoid, hand, side, mirror) {
+  // 손목이 가려진(신뢰 불가) 프레임에는 마지막 신뢰 목표로만 수렴시킨다.
+  _applyHand(humanoid, hand, side, mirror, trusted) {
     if (!hand) return;
     for (const { lm, bones } of FINGER_CHAINS) {
       for (let i = 0; i < bones.length; i++) {
+        const boneName = `${side}${bones[i]}`;
+        if (!trusted) {
+          this._coastBone(humanoid, boneName, SMOOTH_FINGER);
+          continue;
+        }
         // 끝마디(Distal)는 자식 본이 없다 → childName 을 null 로 넘겨 폴백을 쓰게 한다
         const childName = i + 1 < bones.length ? `${side}${bones[i + 1]}` : null;
         this._applyBoneDirection(
           humanoid, hand[lm[i]], hand[lm[i + 1]],
-          `${side}${bones[i]}`, childName,
+          boneName, childName,
           mirror, Z_WEIGHT_FINGER, DIR_SMOOTH_FINGER, SMOOTH_FINGER
         );
       }
@@ -932,8 +1002,53 @@ export class SkeletonAvatar {
   // 본 하나를 "fromLm → toLm 방향"으로 향하게 한다. 위팔/아래팔 공통.
   // childName 은 rest 방향을 얻기 위한 자식 본(위팔→아래팔, 아래팔→손).
   // 랜드마크가 없거나 길이가 0 이면 아무것도 안 하고 직전 회전을 유지한다.
+  // VIS_DEBUG 용: 임계값 감을 잡으려고 60프레임마다 관절별 visibility 를 찍는다.
+  _logVisibility(pose) {
+    if (++this._visLogCount < 60) return;
+    this._visLogCount = 0;
+    if (!pose) {
+      console.log('[vis] pose 없음');
+      return;
+    }
+    const f = (i) => {
+      const v = pose[i]?.visibility;
+      return v == null ? ' -- ' : `${v < VIS_THRESHOLD ? '!' : ' '}${v.toFixed(2)}`;
+    };
+    console.log(
+      `[vis] 어깨 L${f(POSE.LEFT_SHOULDER)} R${f(POSE.RIGHT_SHOULDER)}` +
+      ` | 팔꿈치 L${f(POSE.LEFT_ELBOW)} R${f(POSE.RIGHT_ELBOW)}` +
+      ` | 손목 L${f(POSE.LEFT_WRIST)} R${f(POSE.RIGHT_WRIST)}` +
+      `  (임계 ${VIS_THRESHOLD}, ! = 게이팅됨)`
+    );
+  }
+
+  // 신뢰 불가 프레임용: 새 목표를 만들지 않고 마지막 신뢰 목표로만 계속 수렴시킨다.
+  // 아직 한 번도 신뢰 값이 없었다면 아무것도 안 한다(rest 유지).
+  _coastBone(humanoid, boneName, smooth) {
+    const target = this._boneTargets.get(boneName);
+    if (!target) return;
+    const bone = humanoid.getNormalizedBoneNode(boneName);
+    if (bone) bone.quaternion.slerp(target, smooth);
+  }
+
+  // 이번 프레임의 목표 회전을 본별로 기억해 둔다 (다음에 가려지면 여기로 수렴)
+  _rememberTarget(boneName, q) {
+    let slot = this._boneTargets.get(boneName);
+    if (!slot) {
+      slot = new THREE.Quaternion();
+      this._boneTargets.set(boneName, slot);
+    }
+    slot.copy(q);
+  }
+
   _applyBoneDirection(humanoid, fromLm, toLm, boneName, childName, mirror, zWeight, dirSmooth, smooth) {
     if (!fromLm || !toLm) return;
+    // 양 끝 중 하나라도 신뢰도가 낮으면 이 본은 이번 프레임에 갱신하지 않는다.
+    // (위팔은 어깨+팔꿈치, 아래팔은 팔꿈치+손목이 자동으로 검사된다)
+    if (!isVisible(fromLm) || !isVisible(toLm)) {
+      this._coastBone(humanoid, boneName, smooth);
+      return;
+    }
     const bone = humanoid.getNormalizedBoneNode(boneName);
     if (!bone || !bone.parent) return;
     const child = childName ? humanoid.getNormalizedBoneNode(childName) : null;
@@ -974,8 +1089,14 @@ export class SkeletonAvatar {
     dir.applyQuaternion(this._armQ.invert());
 
     this._armTargetQ.setFromUnitVectors(rest, dir);
+    this._rememberTarget(boneName, this._armTargetQ);
     // 튀지 않게 slerp 로 보간
     bone.quaternion.slerp(this._armTargetQ, smooth);
+  }
+
+  // 녹화 대상 캔버스 = 메인 렌더러(아바타만 그려짐). 스켈레톤·웹캠은 다른 캔버스라 안 들어간다.
+  getMainCanvas() {
+    return this.renderer ? this.renderer.domElement : null;
   }
 
   // 카메라를 초기 정면 뷰로 되돌린다.
