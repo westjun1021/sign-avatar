@@ -6,9 +6,15 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import {
+  VRMLoaderPlugin,
+  VRMUtils,
+  VRMExpression,
+  VRMExpressionMorphTargetBind,
+} from '@pixiv/three-vrm';
 import {
   POSE,
+  FACE,
   POSE_UPPER_CONNECTIONS,
   POSE_UPPER_JOINTS,
   HAND_CONNECTIONS,
@@ -55,7 +61,49 @@ const VRM_URL = '/avatar.vrm';
 const VRM_POS = { x: 0, y: -2.0, z: 0 };
 const VRM_SCALE = 1.7;
 
+// ===========================================================================
+// 리타깃 튜닝 상수 — 떨림/펄럭임이 보이면 여기만 만지면 된다.
+//
+// 신호는 두 단계로 걸러진다:
+//   랜드마크 → [z 가중치] → [방향벡터 EMA] → 회전 계산 → [회전 slerp] → 본
+// 뒤쪽(회전 slerp)만으로는 z 가 한 프레임 튈 때의 방향 급변을 못 잡아서
+// 앞단(방향벡터 EMA)에서 한 번 더 거른다.
+// ===========================================================================
+
+// [회전 slerp/EMA 계수] 낮추면 부드럽지만 둔해지고, 높이면 반응은 빠르지만 떨린다.
+const SMOOTH_HEAD = 0.3;
+const SMOOTH_ARM = 0.3;
+const SMOOTH_WRIST = 0.3;
+const SMOOTH_FINGER = 0.4; // 손가락은 작고 빨라서 팔보다 조금 높게
+
+// [방향벡터 EMA 계수] 회전으로 바꾸기 "전"의 목표 방향 자체를 이전 프레임과 섞는다.
+// 낮추면 부드럽지만 둔해지고, 높이면 반응이 빠르다. 1 = 스무딩 없음(B-4b 까지의 동작).
+// 정지 상태 떨림과 앞뒤 펄럭임에 가장 직접적으로 듣는 값.
+const DIR_SMOOTH_ARM = 0.4;
+const DIR_SMOOTH_WRIST = 0.4;
+const DIR_SMOOTH_FINGER = 0.4;
+
+// [z(깊이) 기여도] 방향 벡터의 z 성분에만 곱한다.
+// MediaPipe 의 z 는 단일 웹캠 추정이라 앞뒤 펄럭임의 주원인이다.
+// 1 = 그대로 사용. 낮추면 팔·손이 화면 평면에 가깝게 눕는 대신 앞뒤 흔들림이 준다.
+// (팔은 pose z, 손가락·손목은 손목 기준 상대 z 라 스케일이 서로 다르다 — 따로 둔 이유)
+const Z_WEIGHT_ARM = 1;
+const Z_WEIGHT_WRIST = 1;
+const Z_WEIGHT_FINGER = 1;
+
+// ===========================================================================
+// 성능 계측 (측정 전용 — 로직에 영향 없음)
+// PERF_FRAMES 프레임마다 구간별 평균(ms)을 콘솔에 한 줄로 찍는다.
+// fps 는 실제 벽시계 기준(rAF 간격)이라 total(CPU 작업량)과 따로 봐야 한다:
+//   total 은 작은데 fps 가 낮으면 우리 루프가 아니라 다른 게 프레임을 먹고 있다는 뜻
+//   (MediaPipe holistic.send 가 같은 메인 스레드의 별도 rAF 루프에서 돈다).
+// ===========================================================================
+const PERF_LOG = true;
+const PERF_FRAMES = 60;
+const PERF_KEYS = ['read', 'head', 'arms', 'wrist', 'fingers', 'face', 'vrm', 'mainR', 'dbgR'];
+
 // --- B-2: 머리 회전 ---
+// (머리는 방향벡터가 아니라 각도를 직접 만들고 z 를 쓰지 않아 위 두 블록과 무관하다)
 // normalized head bone 의 부호 규약(이 모델에서 실측):
 //   rotation.x > 0 → 위를 봄 / rotation.y > 0 → 화면 오른쪽을 봄
 //   rotation.z > 0 → 머리 위쪽이 화면 오른쪽으로 갸웃
@@ -68,23 +116,49 @@ const HEAD_ROLL_GAIN = 1.0;
 // 있으면 이 값도 달라진다. 머리가 계속 숙여져(젖혀져) 보이면 이 값을 키우거나(줄이거나) 조정.
 const HEAD_PITCH_BIAS = 0.35;
 const HEAD_MAX_ANGLE = 0.6; // rad, 과회전 방지
-const HEAD_SMOOTH = 0.3;    // 머리 각도 EMA 계수
 
-// --- B-3a: 위팔(어깨~팔꿈치)만 리타깃 ---
-const ARM_SMOOTH = 0.3; // 위팔 회전 slerp 계수
-// MediaPipe pose 의 z(깊이)는 단일 웹캠 추정이라 팔꿈치에서 특히 흔들린다.
-// 1 이면 그대로 사용. 팔이 앞뒤로 펄럭이면 0.3~0.6 으로 낮춰 깊이 영향을 줄인다.
-const ARM_Z_WEIGHT = 1;
+// --- B-5a: 표정 (입 벌림만) ---
+// 이 모델이 가진 expression: neutral, aa, ih, ou, ee, oh, blink, blinkLeft,
+// blinkRight, angry, relaxed, happy, sad, Surprised (실측). 표준 VRM 프리셋.
+const MOUTH_EXPRESSION = 'aa';
+// openRatio = 입 세로거리 / 가로거리. 얼굴 크기로 정규화되므로 카메라 거리와 무관하다.
+// 다만 MediaPipe 는 x 를 영상 폭으로, y 를 높이로 각각 정규화하므로 영상 종횡비가
+// 상수배로 섞여 들어간다 — 아래 두 값이 그걸 흡수한다.
+// 입을 다물어도 벌어져 보이면 BIAS 를 키우고, 크게 벌려도 덜 벌어지면 GAIN 을 키운다.
+const MOUTH_OPEN_BIAS = 0.10;
+const MOUTH_OPEN_GAIN = 2.0;
+const MOUTH_SMOOTH = 0.5; // 입 벌림 EMA
 
-// --- B-4b: 손목(Hand 본) 방향 + roll ---
-const WRIST_SMOOTH = 0.3;
+// --- B-5b: 눈 깜빡임 (양눈 공통. 윙크는 아직 안 함) ---
+const BLINK_EXPRESSION = 'blink';
+// openness = 눈 세로거리 / 가로거리(EAR). 눈 뜨면 크고 감으면 작다.
+// blink 는 그 반대라 1 에서 빼서 만든다.
+// 평소에 눈이 반쯤 감겨 보이면 BIAS 를 낮추고, 감아도 안 감기면 BIAS 를 높인다.
+const EYE_CLOSE_BIAS = 0.15;
+const EYE_OPEN_GAIN = 3.0;
+// 깜빡임은 0.1초대의 빠른 동작이라 입보다 반응을 빠르게 둔다.
+// 너무 낮추면 깜빡임이 뭉개져서 안 감긴 것처럼 보인다.
+const EYE_SMOOTH = 0.65;
 
-// --- B-4: 손가락 ---
-// 손가락은 작고 빠르게 움직여서 팔보다 반응을 조금 높게.
-const FINGER_SMOOTH = 0.4;
-// 손 랜드마크의 z 는 손목 기준 상대값이라 팔의 z 와 스케일이 다르다.
-// 손가락이 앞뒤로 튀면 낮추고, 주먹 쥘 때 덜 굽으면 올린다.
-const FINGER_Z_WEIGHT = 1;
+// --- B-5c: 눈썹 올림/내림 (수어 의문문 표지가 주 목적) ---
+// 이 모델엔 눈썹 본도, 눈썹 전용 expression 도 없다. Fcl_BRW_* morph 5개가 있는데
+// 어떤 expression 에도 안 묶여 있어서(사전확인), 커스텀 expression 을 만들어 붙인다.
+// 이름은 기존 프리셋 14개(neutral/aa/ih/ou/ee/oh/blink/blinkLeft/blinkRight/
+// angry/relaxed/happy/sad/Surprised)와 겹치지 않는다.
+const BROW_UP_EXPRESSION = 'browUp';
+const BROW_DOWN_EXPRESSION = 'browDown';
+const BROW_UP_MORPH = 'Fcl_BRW_Surprised';
+const BROW_DOWN_MORPH = 'Fcl_BRW_Angry';
+// browRaise = (눈썹~눈 거리) / 얼굴크기. 중립값을 빼고 스케일해서 ±로 만든다.
+// 평소에도 눈썹이 올라가 있으면 BIAS 를 키우고, 올려도 반응이 약하면 GAIN 을 키운다.
+// (중립 기준값. 눈썹~눈꺼풀 18mm / 눈 바깥끝 사이 90mm 에 16:9 종횡비를 반영해 역산.
+//  사람마다 눈썹 위치 편차가 커서 실사용에서 제일 먼저 만지게 될 값이다.)
+const BROW_BIAS = 0.36;
+const BROW_GAIN = 6.0;
+// 올림이 주 목적이라 내림은 약하게. 찡그림이 과해 보이면 더 낮춘다.
+const BROW_UP_SCALE = 1.0;
+const BROW_DOWN_SCALE = 0.7;
+const BROW_SMOOTH = 0.4; // 입(0.5)과 눈(0.65) 중간
 
 // 손가락 마디 매핑 테이블: 랜드마크 인덱스 체인 ↔ VRM 본 접미사 체인.
 // lm[i] → lm[i+1] 방향이 bones[i] 본의 방향이 된다.
@@ -141,6 +215,20 @@ export class SkeletonAvatar {
     this._wM = new THREE.Matrix4();
     this._wRestQ = new THREE.Quaternion();
     this._wTargetQ = new THREE.Quaternion();
+    // 방향벡터 EMA 슬롯: 키(본 이름 등) → 직전 프레임의 정규화된 방향.
+    // 팔 4 + 손목 4(양손 f/l) + 손가락 30 정도가 들어간다.
+    // 첫 유효 방향은 스냅해서, 0 에서 미끄러져 들어오는 게 안 보이게 한다.
+    this._dirSlots = new Map();
+    // 성능 계측 누적기 (PERF_LOG 가 false 면 쓰이지 않는다)
+    this._perfAcc = Object.fromEntries(PERF_KEYS.map((k) => [k, 0]));
+    this._perfCount = 0;
+    this._perfLast = 0;
+    this._perfWallStart = null; // null = 아직 시작 안 함 (0 은 유효한 타임스탬프라 못 씀)
+    this._mouthOpen = 0; // 입 벌림 EMA 상태 (0 = 다문 입)
+    this._eyeBlink = 0;  // 눈 감김 EMA 상태 (0 = 눈 뜬 상태)
+    this._browUp = 0;    // 눈썹 올림 EMA 상태
+    this._browDown = 0;  // 눈썹 내림 EMA 상태
+    this._browReady = false; // 커스텀 눈썹 expression 등록 성공 여부
     // 굵은 선 오브젝트 모음 (resolution 갱신 / dispose 용)
     this._fatLines = [];
 
@@ -247,6 +335,17 @@ export class SkeletonAvatar {
         vrm.scene.position.set(VRM_POS.x, VRM_POS.y, VRM_POS.z);
         vrm.scene.scale.setScalar(VRM_SCALE);
         this.scene.add(vrm.scene);
+
+        // VRM 마다 표정 프리셋이 달라서 한 번 찍어둔다.
+        // MOUTH_EXPRESSION 이 여기 없으면 setValue 가 조용히 무시되므로 확인용.
+        const em = vrm.expressionManager;
+        const names = em ? em.expressions.map((e) => e.expressionName) : [];
+        console.log('[expressions]', names);
+        if (!em || !em.getExpression(MOUTH_EXPRESSION)) {
+          console.warn(`[vrm] '${MOUTH_EXPRESSION}' expression 이 없습니다 — 입 벌림이 동작하지 않습니다.`);
+        }
+
+        this._registerBrowExpressions(vrm);
       },
       undefined,
       (err) => console.error('VRM load error', err)
@@ -356,6 +455,7 @@ export class SkeletonAvatar {
 
   _loop() {
     if (!this._running) return;
+    this._perfStart();
     const lm = this.landmarksRef.current || {};
     const opt = this.optionsRef.current || {};
     const mirror = opt.mirror !== false;
@@ -423,20 +523,208 @@ export class SkeletonAvatar {
       this.facePoints.visible = false;
     }
 
+    // 여기까지가 랜드마크 읽기 + 좌표 변환(스켈레톤 버퍼 채우기)
+    this._perfMark('read');
+
     // VRM: 본 회전을 먼저 적용하고 나서 update() 를 불러야 스프링본 등에 반영된다.
     // (머리 추적은 스켈레톤 토글과 무관하게 항상 동작 — VRM 은 별개 오브젝트)
     this._updateVrmHead(lm.pose, mirror);
+    this._perfMark('head');
     this._updateVrmArms(lm.pose, mirror);
+    this._perfMark('arms');
     // 손목 → 손가락 순서. 손가락의 부모(손)가 먼저 최신이어야 한다.
     this._updateVrmWrists(lm.leftHand, lm.rightHand, mirror);
+    this._perfMark('wrist');
     this._updateVrmFingers(lm.leftHand, lm.rightHand, mirror);
+    this._perfMark('fingers');
+    this._updateVrmMouth(lm.face);
+    this._updateVrmEyes(lm.face);
+    this._updateVrmBrows(lm.face);
+    this._perfMark('face');
     const delta = this._clock.getDelta();
     if (this.vrm) this.vrm.update(delta);
+    this._perfMark('vrm');
 
     // 같은 씬을 두 시점으로. 레이어 덕분에 서로 상대 오브젝트는 안 그려진다.
-    this.controls.update();
+    this.controls.update(); // 가벼워서 mainR 에 같이 잡힌다
     this.renderer.render(this.scene, this.camera);
+    this._perfMark('mainR');
     if (this.debugRenderer) this.debugRenderer.render(this.scene, this.debugCamera);
+    this._perfMark('dbgR');
+
+    this._perfFlush();
+  }
+
+  // 입 벌린 정도(0~1)를 얼굴 랜드마크에서 뽑아 VRM expression 에 넣는다.
+  // 눈·기타 표정은 아직 안 함. (스켈레톤의 showFace 토글과는 무관 — VRM 은 별개)
+  // 얼굴이 안 잡히면 목표 0(다문 입)으로 부드럽게 닫는다.
+  _updateVrmMouth(face) {
+    if (!this.vrm) return;
+    const em = this.vrm.expressionManager;
+    if (!em) return;
+
+    let target = 0;
+    if (face) {
+      const up = face[FACE.UPPER_LIP_INNER];
+      const low = face[FACE.LOWER_LIP_INNER];
+      const cl = face[FACE.MOUTH_CORNER_L];
+      const cr = face[FACE.MOUTH_CORNER_R];
+      if (up && low && cl && cr) {
+        const width = Math.hypot(cl.x - cr.x, cl.y - cr.y);
+        // 0 으로 나누면 NaN 이 되고 EMA 를 타고 영구히 오염된다. 반드시 차단.
+        if (width > 1e-6) {
+          const openRatio = Math.hypot(up.x - low.x, up.y - low.y) / width;
+          target = THREE.MathUtils.clamp((openRatio - MOUTH_OPEN_BIAS) * MOUTH_OPEN_GAIN, 0, 1);
+        }
+      }
+    }
+
+    this._mouthOpen += (target - this._mouthOpen) * MOUTH_SMOOTH;
+    // 실제 morph 반영은 vrm.update(delta) 에서 일어난다 — 그래서 update 앞에 있어야 한다
+    em.setValue(MOUTH_EXPRESSION, this._mouthOpen);
+  }
+
+  // Fcl_BRW_* morph 를 커스텀 expression 으로 등록해서 입·눈과 같은 setValue 로 쓴다.
+  // morph 인덱스는 메시마다 다를 수 있으므로 메시별로 bind 를 하나씩 만든다.
+  // 실패하면 경고만 남기고 눈썹은 조용히 비활성(_browReady = false).
+  _registerBrowExpressions(vrm) {
+    this._browReady = false;
+    const em = vrm.expressionManager;
+    if (!em) {
+      console.warn('[brow] expressionManager 가 없어 눈썹을 건너뜁니다.');
+      return;
+    }
+
+    const make = (name, morphName) => {
+      // 기존 프리셋과 이름이 겹치면 덮어써서 다른 표정을 망가뜨린다
+      if (em.getExpression(name)) {
+        console.warn(`[brow] '${name}' 이 이미 있어 등록하지 않습니다.`);
+        return false;
+      }
+      const expression = new VRMExpression(name);
+      let bound = 0;
+      vrm.scene.traverse((obj) => {
+        const dict = obj.morphTargetDictionary;
+        if (!dict) return;
+        const index = dict[morphName];
+        if (index === undefined) return;
+        expression.addBind(new VRMExpressionMorphTargetBind({ primitives: [obj], index, weight: 1 }));
+        bound++;
+      });
+      if (bound === 0) {
+        console.warn(`[brow] morph '${morphName}' 을 가진 메시가 없어 '${name}' 을 건너뜁니다.`);
+        return false;
+      }
+      em.registerExpression(expression);
+      return true;
+    };
+
+    const up = make(BROW_UP_EXPRESSION, BROW_UP_MORPH);
+    const down = make(BROW_DOWN_EXPRESSION, BROW_DOWN_MORPH);
+    this._browReady = up && down;
+    console.log(`[brow] ${this._browReady ? '등록 완료' : '등록 실패 — 눈썹 비활성'}:`,
+      `${BROW_UP_EXPRESSION}→${BROW_UP_MORPH}, ${BROW_DOWN_EXPRESSION}→${BROW_DOWN_MORPH}`);
+  }
+
+  // 눈썹 높이(0~1 양방향)를 커스텀 expression 에 넣는다.
+  // 얼굴이 안 잡히면 둘 다 0(중립)으로 되돌린다.
+  _updateVrmBrows(face) {
+    if (!this.vrm || !this._browReady) return;
+    const em = this.vrm.expressionManager;
+    if (!em) return;
+
+    let raw = 0;
+    if (face) {
+      const bl = face[FACE.BROW_L], br = face[FACE.BROW_R];
+      const el = face[FACE.EYE_L_UPPER], er = face[FACE.EYE_R_UPPER];
+      const fa = face[FACE.EYE_L_OUTER], fb = face[FACE.EYE_R_OUTER];
+      if (bl && br && el && er && fa && fb) {
+        // 얼굴 크기로 정규화 → 카메라 거리와 무관
+        const faceWidth = Math.hypot(fa.x - fb.x, fa.y - fb.y);
+        // 0 으로 나누면 NaN → EMA 가 영구 오염된다. 반드시 차단.
+        if (faceWidth > 1e-6) {
+          const raiseL = Math.hypot(bl.x - el.x, bl.y - el.y);
+          const raiseR = Math.hypot(br.x - er.x, br.y - er.y);
+          const browRaise = (raiseL + raiseR) / 2 / faceWidth;
+          raw = (browRaise - BROW_BIAS) * BROW_GAIN; // + 올림 / - 내림
+        }
+      }
+    }
+
+    const targetUp = THREE.MathUtils.clamp(raw, 0, 1);
+    const targetDown = THREE.MathUtils.clamp(-raw, 0, 1);
+    this._browUp += (targetUp - this._browUp) * BROW_SMOOTH;
+    this._browDown += (targetDown - this._browDown) * BROW_SMOOTH;
+    em.setValue(BROW_UP_EXPRESSION, this._browUp * BROW_UP_SCALE);
+    em.setValue(BROW_DOWN_EXPRESSION, this._browDown * BROW_DOWN_SCALE);
+  }
+
+  // 한쪽 눈의 EAR(세로/가로). 못 재면 null.
+  _eyeOpenness(face, upIdx, lowIdx, aIdx, bIdx) {
+    const up = face[upIdx], low = face[lowIdx], a = face[aIdx], b = face[bIdx];
+    if (!up || !low || !a || !b) return null;
+    const width = Math.hypot(a.x - b.x, a.y - b.y);
+    if (!(width > 1e-6)) return null; // 0 으로 나누면 NaN → EMA 가 영구 오염된다
+    return Math.hypot(up.x - low.x, up.y - low.y) / width;
+  }
+
+  // 눈 감긴 정도(0~1)를 VRM 'blink' 에 넣는다. 좌우 공통(윙크는 아직 안 함).
+  // 얼굴이 안 잡히면 0(눈 뜬 상태)으로 되돌린다.
+  _updateVrmEyes(face) {
+    if (!this.vrm) return;
+    const em = this.vrm.expressionManager;
+    if (!em) return;
+
+    let target = 0;
+    if (face) {
+      const l = this._eyeOpenness(face, FACE.EYE_L_UPPER, FACE.EYE_L_LOWER, FACE.EYE_L_OUTER, FACE.EYE_L_INNER);
+      const r = this._eyeOpenness(face, FACE.EYE_R_UPPER, FACE.EYE_R_LOWER, FACE.EYE_R_INNER, FACE.EYE_R_OUTER);
+      // 한쪽만 잡혀도 그 값으로 간다 (양쪽 다 없으면 눈 뜬 상태 유지)
+      const openness = l !== null && r !== null ? (l + r) / 2 : (l !== null ? l : r);
+      if (openness !== null) {
+        // 뜨면 openness 큼 → blink 0 / 감으면 작음 → blink 1
+        target = 1 - THREE.MathUtils.clamp((openness - EYE_CLOSE_BIAS) * EYE_OPEN_GAIN, 0, 1);
+      }
+    }
+
+    this._eyeBlink += (target - this._eyeBlink) * EYE_SMOOTH;
+    em.setValue(BLINK_EXPRESSION, this._eyeBlink);
+  }
+
+  // --- 성능 계측 헬퍼 (측정 전용) ---
+  _perfStart() {
+    if (!PERF_LOG) return;
+    if (this._perfWallStart === null) this._perfWallStart = performance.now();
+    this._perfLast = performance.now();
+  }
+
+  // 직전 마크 이후 걸린 시간을 해당 구간에 누적
+  _perfMark(key) {
+    if (!PERF_LOG) return;
+    const now = performance.now();
+    this._perfAcc[key] += now - this._perfLast;
+    this._perfLast = now;
+  }
+
+  _perfFlush() {
+    if (!PERF_LOG) return;
+    if (++this._perfCount < PERF_FRAMES) return;
+    const n = this._perfCount;
+    const wall = performance.now() - this._perfWallStart;
+    let total = 0;
+    const parts = [];
+    for (const k of PERF_KEYS) {
+      const avg = this._perfAcc[k] / n;
+      total += avg;
+      parts.push(`${k} ${avg.toFixed(2)}`);
+      this._perfAcc[k] = 0;
+    }
+    // total = 우리 루프의 CPU 작업량 / fps = 실제 프레임 간격 기준
+    console.log(
+      `[perf] ${parts.join(' | ')} | total ${total.toFixed(2)}ms | fps ${(1000 * n / wall).toFixed(0)}`
+    );
+    this._perfCount = 0;
+    this._perfWallStart = performance.now();
   }
 
   // VRM 머리를 사람 머리 방향에 맞춰 회전시킨다. (팔·손가락·표정은 아직 안 함)
@@ -482,9 +770,9 @@ export class SkeletonAvatar {
 
     // 튀지 않게 현재 각도에서 목표로 EMA 보간
     const r = headBone.rotation;
-    r.x += (targetPitch - r.x) * HEAD_SMOOTH;
-    r.y += (targetYaw - r.y) * HEAD_SMOOTH;
-    r.z += (targetRoll - r.z) * HEAD_SMOOTH;
+    r.x += (targetPitch - r.x) * SMOOTH_HEAD;
+    r.y += (targetYaw - r.y) * SMOOTH_HEAD;
+    r.z += (targetRoll - r.z) * SMOOTH_HEAD;
   }
 
   // VRM 팔(위팔 + 아래팔)을 사람 팔 방향에 맞춘다. 손가락은 아직 안 함.
@@ -510,8 +798,8 @@ export class SkeletonAvatar {
       // 위팔을 반드시 먼저. 아래팔은 부모(=위팔)의 "현재" 월드 회전을 읽어서
       // 목표 방향을 부모 공간으로 옮기므로, 순서가 뒤바뀌면 한 프레임 늦은
       // 부모 회전으로 계산돼 굽힘 방향이 틀어진다.
-      this._applyBoneDirection(humanoid, pose[si], pose[ei], `${side}UpperArm`, `${side}LowerArm`, mirror, ARM_Z_WEIGHT, ARM_SMOOTH);
-      this._applyBoneDirection(humanoid, pose[ei], pose[wi], `${side}LowerArm`, `${side}Hand`, mirror, ARM_Z_WEIGHT, ARM_SMOOTH);
+      this._applyBoneDirection(humanoid, pose[si], pose[ei], `${side}UpperArm`, `${side}LowerArm`, mirror, Z_WEIGHT_ARM, DIR_SMOOTH_ARM, SMOOTH_ARM);
+      this._applyBoneDirection(humanoid, pose[ei], pose[wi], `${side}LowerArm`, `${side}Hand`, mirror, Z_WEIGHT_ARM, DIR_SMOOTH_ARM, SMOOTH_ARM);
     }
   }
 
@@ -563,13 +851,25 @@ export class SkeletonAvatar {
     if (!this._makeHandBasis(this._wF, this._wL, this._wM)) return;
     this._wRestQ.setFromRotationMatrix(this._wM);
 
-    // 목표 basis: 랜드마크를 기존 place() 규약으로 옮겨서 같은 방식으로 구성
+    // 목표 basis: 랜드마크를 기존 place() 규약으로 옮겨서 같은 방식으로 구성.
+    // 두 축 모두 z 가중치 + 방향 EMA 를 거친다. 손바닥 평면은 z 노이즈에
+    // 특히 약해서(손이 카메라와 평행하면 법선이 z 로만 결정됨) 여기 필터가 중요하다.
     place(this._armA, wrist, mirror, this._origin);
     place(this._armB, middleMCP, mirror, this._origin);
     this._wF.copy(this._armB).sub(this._armA);
+    this._wF.z *= Z_WEIGHT_WRIST;
+    if (!(this._wF.lengthSq() > 1e-8)) return;
+    this._wF.normalize();
+    this._smoothDir(`${side}Hand:f`, this._wF, DIR_SMOOTH_WRIST);
+
     place(this._armA, indexMCP, mirror, this._origin);
     place(this._armB, pinkyMCP, mirror, this._origin);
     this._wL.copy(this._armA).sub(this._armB);
+    this._wL.z *= Z_WEIGHT_WRIST;
+    if (!(this._wL.lengthSq() > 1e-8)) return;
+    this._wL.normalize();
+    this._smoothDir(`${side}Hand:l`, this._wL, DIR_SMOOTH_WRIST);
+
     if (!this._makeHandBasis(this._wF, this._wL, this._wM)) return;
     this._wTargetQ.setFromRotationMatrix(this._wM);
 
@@ -577,7 +877,7 @@ export class SkeletonAvatar {
     //   parentQ * (qLocal * qRest) = qTarget  →  qLocal = parentQ⁻¹ · qTarget · qRest⁻¹
     bone.parent.getWorldQuaternion(this._armQ);
     this._wTargetQ.premultiply(this._armQ.invert()).multiply(this._wRestQ.invert());
-    bone.quaternion.slerp(this._wTargetQ, WRIST_SMOOTH);
+    bone.quaternion.slerp(this._wTargetQ, SMOOTH_WRIST);
   }
 
   // VRM 손가락을 손 랜드마크(21점)에 맞춰 굽힌다.
@@ -602,16 +902,37 @@ export class SkeletonAvatar {
         this._applyBoneDirection(
           humanoid, hand[lm[i]], hand[lm[i + 1]],
           `${side}${bones[i]}`, childName,
-          mirror, FINGER_Z_WEIGHT, FINGER_SMOOTH
+          mirror, Z_WEIGHT_FINGER, DIR_SMOOTH_FINGER, SMOOTH_FINGER
         );
       }
     }
   }
 
+  // 정규화된 방향 벡터에 EMA 를 건다. dir 을 제자리에서 갱신하고 그대로 돌려준다.
+  // alpha = 새 값의 비중(1 이면 스무딩 없음).
+  _smoothDir(key, dir, alpha) {
+    if (alpha >= 1) return dir;
+    let prev = this._dirSlots.get(key);
+    if (!prev) {
+      // 첫 유효 방향은 스냅 (원점 EMA 의 _originReady 와 같은 패턴)
+      this._dirSlots.set(key, dir.clone());
+      return dir;
+    }
+    prev.lerp(dir, alpha);
+    const len = prev.length();
+    // 거의 정반대 방향이 섞여 0 이 되면 방향이 무의미해진다 → 이번 값으로 리셋
+    if (!(len > 1e-6)) {
+      prev.copy(dir);
+      return dir;
+    }
+    prev.divideScalar(len);
+    return dir.copy(prev);
+  }
+
   // 본 하나를 "fromLm → toLm 방향"으로 향하게 한다. 위팔/아래팔 공통.
   // childName 은 rest 방향을 얻기 위한 자식 본(위팔→아래팔, 아래팔→손).
   // 랜드마크가 없거나 길이가 0 이면 아무것도 안 하고 직전 회전을 유지한다.
-  _applyBoneDirection(humanoid, fromLm, toLm, boneName, childName, mirror, zWeight, smooth) {
+  _applyBoneDirection(humanoid, fromLm, toLm, boneName, childName, mirror, zWeight, dirSmooth, smooth) {
     if (!fromLm || !toLm) return;
     const bone = humanoid.getNormalizedBoneNode(boneName);
     if (!bone || !bone.parent) return;
@@ -622,11 +943,15 @@ export class SkeletonAvatar {
     place(this._armA, fromLm, mirror, this._origin);
     place(this._armB, toLm, mirror, this._origin);
     const dir = this._armB.sub(this._armA);
+    // z 가중치는 "차이 벡터"의 z 에 건다. place() 가 z 에 대해 선형이라
+    // 랜드마크 z 차이를 그대로 줄이는 것과 같다.
     dir.z *= zWeight;
     const len = dir.length();
     // 0 으로 나누면 NaN → slerp 를 타고 본 회전이 영구히 NaN 이 된다. 반드시 차단.
     if (!(len > 1e-4)) return;
     dir.divideScalar(len);
+    // 회전으로 바꾸기 전에 방향 자체를 한 번 걸러준다
+    this._smoothDir(boneName, dir, dirSmooth);
 
     // rest 방향(부모 공간 기준) = 자식 본의 로컬 위치.
     // 정규화 골격은 rest 로컬 회전이 identity 라서 이 등식이 성립한다(실측 확인).

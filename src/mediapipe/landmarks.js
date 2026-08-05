@@ -41,6 +41,27 @@ export const POSE_UPPER_JOINTS = [
   POSE.RIGHT_WRIST,
 ];
 
+// --- 얼굴 메시(468점 + refine 시 홍채 10점) 중 표정 계산에 쓰는 점 ---
+// refineFaceLandmarks 를 켜도 0~467 인덱스는 그대로라 아래 값은 동일하다.
+export const FACE = {
+  UPPER_LIP_INNER: 13, // 윗입술 안쪽
+  LOWER_LIP_INNER: 14, // 아랫입술 안쪽
+  MOUTH_CORNER_L: 61,
+  MOUTH_CORNER_R: 291,
+  // 눈: EAR(세로/가로) 계산용. 눈마다 위/아래 눈꺼풀 + 좌우 끝.
+  EYE_L_UPPER: 159,
+  EYE_L_LOWER: 145,
+  EYE_L_OUTER: 33,
+  EYE_L_INNER: 133,
+  EYE_R_UPPER: 386,
+  EYE_R_LOWER: 374,
+  EYE_R_INNER: 362,
+  EYE_R_OUTER: 263,
+  // 눈썹 중앙. 같은 쪽 눈 위 점과의 거리로 눈썹 높이를 잰다.
+  BROW_L: 105,
+  BROW_R: 334,
+};
+
 // --- 손(21점) 표준 연결 ---
 export const HAND_CONNECTIONS = [
   // 엄지
