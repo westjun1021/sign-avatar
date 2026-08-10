@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { useHolistic } from './mediapipe/useHolistic.js';
 import { useRecorder } from './recording/useRecorder.js';
+import { useFreeMocap } from './freemocap/useFreeMocap.js';
 import AvatarStage from './components/AvatarStage.jsx';
 import CameraPanel from './components/CameraPanel.jsx';
 import SkeletonPanel from './components/SkeletonPanel.jsx';
 import Controls from './components/Controls.jsx';
+import FreeMocapStage from './components/FreeMocapStage.jsx';
+import FreeMocapControls from './components/FreeMocapControls.jsx';
 
 export default function App() {
+  // 'live' = 웹캠/영상 실시간 추적 + VRM (기존)
+  // 'fmc'  = FreeMoCap 3D CSV 재생 (F-2, 스틱맨만)
+  // 무대는 한 번에 하나만 마운트한다 — WebGL 컨텍스트와 rAF 루프를 둘 다 띄우지 않기 위해.
+  const [mode, setMode] = useState('live');
+
   const videoRef = useRef(null);
   // 랜드마크는 ref 로 흘림 (초당 30fps 리렌더 방지)
   const landmarksRef = useRef({ pose: null, leftHand: null, rightHand: null, face: null });
@@ -64,12 +72,50 @@ export default function App() {
 
   const elapsedText = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`;
 
-  const statusText = {
-    idle: '대기 중',
-    loading: '모델 불러오는 중…',
-    running: '추적 중',
-    error: '오류',
-  }[status];
+  // --- F-2: FreeMoCap 재생 모드 ---
+  const fmc = useFreeMocap();
+  const fmcPlayerRef = useRef(null);
+  const csvInputRef = useRef(null);
+  const csvFolderInputRef = useRef(null);
+
+  const onCsvChosen = (e) => {
+    const files = e.target.files;
+    // 같은 파일을 다시 고를 수 있게 비운다 (files 는 위에서 이미 참조를 잡았다)
+    const list = files ? Array.from(files) : [];
+    e.target.value = '';
+    if (list.length) fmc.load(list);
+  };
+
+  // 재생 모드로 갈 때 실시간 추적을 멈춘다.
+  // MediaPipe 추론은 메인 스레드의 별도 rAF 루프라, 켜둔 채로 두면 재생이 끊긴다.
+  const switchMode = (next) => {
+    if (next === mode) return;
+    if (next === 'fmc') {
+      if (isRecording) recorder.stop();
+      if (status === 'running' || status === 'loading') stop();
+    } else {
+      fmc.setPlaying(false);
+    }
+    setMode(next);
+  };
+
+  const statusText = mode === 'fmc'
+    ? {
+        idle: 'CSV 대기 중',
+        loading: 'CSV 읽는 중…',
+        ready: `${fmc.clip?.frameCount || 0} 프레임 재생 준비`,
+        error: '오류',
+      }[fmc.status]
+    : {
+        idle: '대기 중',
+        loading: '모델 불러오는 중…',
+        running: '추적 중',
+        error: '오류',
+      }[status];
+
+  const dotStatus = mode === 'fmc'
+    ? { idle: 'idle', loading: 'loading', ready: 'running', error: 'error' }[fmc.status]
+    : status;
 
   return (
     <div className="app">
@@ -81,15 +127,116 @@ export default function App() {
         style={{ display: 'none' }}
         onChange={onFileChosen}
       />
+      {/* FreeMoCap CSV: 파일 여러 개 선택 / 폴더 통째로 선택 */}
+      <input
+        ref={csvInputRef}
+        type="file"
+        accept=".csv"
+        multiple
+        style={{ display: 'none' }}
+        onChange={onCsvChosen}
+      />
+      <input
+        ref={csvFolderInputRef}
+        type="file"
+        webkitdirectory=""
+        directory=""
+        style={{ display: 'none' }}
+        onChange={onCsvChosen}
+      />
       <header className="topbar">
         <div className="brand">
-          <span className="dot" data-status={status} />
+          <span className="dot" data-status={dotStatus} />
           <h1>Sign Avatar</h1>
           <span className="sub">사람 동작을 3D 스켈레톤이 따라 합니다</span>
         </div>
-        <div className="status">{statusText}</div>
+        <div className="topbar-right">
+          <div className="mode-switch">
+            <button className={mode === 'live' ? 'on' : ''} onClick={() => switchMode('live')}>
+              실시간
+            </button>
+            <button className={mode === 'fmc' ? 'on' : ''} onClick={() => switchMode('fmc')}>
+              FreeMoCap 재생
+            </button>
+          </div>
+          <div className="status">{statusText}</div>
+        </div>
       </header>
 
+      {mode === 'fmc' ? (
+        <main className="layout">
+          <section className="stage-wrap">
+            <FreeMocapStage
+              clipRef={fmc.clipRef}
+              stateRef={fmc.stateRef}
+              playerRef={fmcPlayerRef}
+            />
+            <div className="stage-tools">
+              <button
+                className="tool-btn"
+                onClick={() => fmcPlayerRef.current?.resetView()}
+                title="드래그로 돌린 시점을 초기 정면 뷰로 되돌립니다"
+              >
+                정면으로
+              </button>
+            </div>
+            {fmc.status !== 'ready' && (
+              <div className="overlay">
+                <div className={`overlay-card${fmc.status === 'error' ? ' error' : ''}`}>
+                  <p>
+                    FreeMoCap 이 뽑은 3D CSV 를 불러와<br />스켈레톤으로 재생합니다.
+                  </p>
+                  <div className="source-buttons">
+                    <button onClick={() => csvInputRef.current?.click()} disabled={fmc.status === 'loading'}>
+                      CSV 3개 선택
+                    </button>
+                    <button
+                      className="secondary"
+                      onClick={() => csvFolderInputRef.current?.click()}
+                      disabled={fmc.status === 'loading'}
+                    >
+                      폴더 선택
+                    </button>
+                  </div>
+                  {fmc.status === 'error' ? (
+                    <small>{fmc.error}</small>
+                  ) : (
+                    <small>
+                      saved_data/csv 의 body / right_hand / left_hand
+                      _trajectories.csv 를 고르거나, 녹화 폴더를 통째로 고르세요.
+                    </small>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+
+          <aside className="side">
+            <FreeMocapControls
+              clip={fmc.clip}
+              status={fmc.status}
+              error={fmc.error}
+              fileNames={fmc.fileNames}
+              frame={fmc.frame}
+              seek={fmc.seek}
+              playing={fmc.playing}
+              togglePlay={fmc.togglePlay}
+              transform={fmc.transform}
+              setTransform={fmc.setTransform}
+              view={fmc.view}
+              setView={fmc.setView}
+              basis={fmc.basis}
+              onPickFiles={() => csvInputRef.current?.click()}
+              onPickFolder={() => csvFolderInputRef.current?.click()}
+            />
+            <p className="hint">
+              VRM 아바타는 아직 안 붙였습니다 — 좌표계가 맞는지 스틱맨으로 먼저
+              확인하는 단계입니다. 드래그로 돌려보며 사람이 똑바로 서서
+              정면을 보는지 확인하세요.
+            </p>
+          </aside>
+        </main>
+      ) : (
       <main className="layout">
         <section className="stage-wrap">
           <AvatarStage
@@ -164,6 +311,7 @@ export default function App() {
           </p>
         </aside>
       </main>
+      )}
     </div>
   );
 }

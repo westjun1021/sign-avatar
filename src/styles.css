@@ -48,6 +48,27 @@ body {
 .brand .dot[data-status='error'] { background: var(--danger); }
 .status { color: var(--muted); font-size: 13px; }
 
+.topbar-right { display: flex; align-items: center; gap: 14px; }
+
+/* 실시간 / FreeMoCap 재생 모드 전환 */
+.mode-switch {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.mode-switch button {
+  border-radius: 0;
+  padding: 6px 13px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--panel);
+  color: var(--muted);
+}
+.mode-switch button + button { border-left: 1px solid var(--line); }
+.mode-switch button:hover { filter: none; color: var(--text); }
+.mode-switch button.on { background: var(--panel-2); color: var(--accent); }
+
 /* 레이아웃 */
 .layout {
   flex: 1;
@@ -199,6 +220,73 @@ button.secondary:hover:not(:disabled) { border-color: var(--accent); color: var(
   border-top: 1px solid var(--line);
   padding-top: 12px;
 }
+
+/* --- FreeMoCap 재생 모드 사이드 패널 --- */
+.fmc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.fmc-section { display: flex; flex-direction: column; gap: 9px; }
+.fmc-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.fmc-panel .source-buttons button { padding: 8px 14px; font-size: 13px; }
+
+.fmc-files {
+  list-style: none;
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  font-size: 11.5px;
+  color: var(--text);
+  line-height: 1.7;
+  word-break: break-all;
+}
+.fmc-files .missing { color: var(--muted); }
+.fmc-files .meta { color: var(--muted); border-top: 1px solid var(--line); margin-top: 5px; padding-top: 5px; }
+
+.fmc-note { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+.fmc-note.error { color: var(--danger); word-break: break-word; }
+
+.fmc-transport { display: flex; gap: 8px; }
+.fmc-transport button { flex: 1; padding: 9px 12px; font-size: 13px; }
+.fmc-transport button.step { flex: 0 0 44px; padding: 9px 0; }
+
+.fmc-slider { flex: 1; min-width: 0; accent-color: var(--accent); }
+.fmc-frame {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.fmc-seg { display: flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.fmc-seg button {
+  flex: 1;
+  border-radius: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--panel);
+  color: var(--muted);
+}
+.fmc-seg button + button { border-left: 1px solid var(--line); }
+.fmc-seg button:hover:not(:disabled) { filter: none; color: var(--text); }
+.fmc-seg button.on { background: var(--panel-2); color: var(--accent); }
+.fmc-seg.tight { flex: 0 0 132px; }
+.fmc-seg.tight button { padding: 6px 0; font-variant-numeric: tabular-nums; }
+
+.fmc-row { display: flex; align-items: center; gap: 10px; }
+.fmc-label { flex: 0 0 64px; font-size: 12px; color: var(--muted); }
 
 /* 반응형 */
 @media (max-width: 820px) {
