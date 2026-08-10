@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useHolistic } from './mediapipe/useHolistic.js';
 import { useRecorder } from './recording/useRecorder.js';
+import { useFreeMocapRecorder } from './recording/useFreeMocapRecorder.js';
 import { useFreeMocap } from './freemocap/useFreeMocap.js';
 import AvatarStage from './components/AvatarStage.jsx';
 import CameraPanel from './components/CameraPanel.jsx';
@@ -77,6 +78,8 @@ export default function App() {
   const fmcPlayerRef = useRef(null);
   const csvInputRef = useRef(null);
   const csvFolderInputRef = useRef(null);
+  // F-4: 재생 화면 녹화. 실시간 녹화와 완전히 별개의 useRecorder 인스턴스다.
+  const fmcRecorder = useFreeMocapRecorder(fmc, fmcPlayerRef);
 
   const onCsvChosen = (e) => {
     const files = e.target.files;
@@ -94,6 +97,8 @@ export default function App() {
       if (isRecording) recorder.stop();
       if (status === 'running' || status === 'loading') stop();
     } else {
+      // 재생 모드를 떠나면 캔버스가 사라지므로 녹화도 접는다
+      fmcRecorder.cancel();
       fmc.setPlaying(false);
     }
     setMode(next);
@@ -112,6 +117,9 @@ export default function App() {
         running: '추적 중',
         error: '오류',
       }[status];
+
+  const fmcLast = Math.max(0, (fmc.clip?.frameCount || 0) - 1);
+  const fmcElapsedText = `${Math.floor(fmcRecorder.elapsed / 60)}:${String(fmcRecorder.elapsed % 60).padStart(2, '0')}`;
 
   const dotStatus = mode === 'fmc'
     ? { idle: 'idle', loading: 'loading', ready: 'running', error: 'error' }[fmc.status]
@@ -179,7 +187,36 @@ export default function App() {
               >
                 정면으로
               </button>
+              {fmc.status === 'ready' && (
+                <>
+                  <button
+                    className={`tool-btn record${fmcRecorder.isRecording && !fmcRecorder.auto ? ' on' : ''}`}
+                    onClick={fmcRecorder.toggle}
+                    disabled={!fmcRecorder.supported || fmcRecorder.auto}
+                    title={
+                      fmcRecorder.supported
+                        ? '지금 보이는 화면을 녹화해서 파일로 저장합니다'
+                        : '이 브라우저는 MediaRecorder 를 지원하지 않습니다'
+                    }
+                  >
+                    {fmcRecorder.isRecording && !fmcRecorder.auto
+                      ? `■ 정지 ${fmcElapsedText}`
+                      : '● 녹화'}
+                  </button>
+                  <button
+                    className={`tool-btn record${fmcRecorder.auto ? ' on' : ''}`}
+                    onClick={fmcRecorder.auto ? fmcRecorder.cancel : fmcRecorder.startAuto}
+                    disabled={!fmcRecorder.supported || (fmcRecorder.isRecording && !fmcRecorder.auto)}
+                    title={`0 번 프레임부터 ${fmcLast} 번까지 재생하며 통째로 녹화하고 자동으로 멈춥니다`}
+                  >
+                    {fmcRecorder.auto
+                      ? `■ 녹화 중 · frame ${fmc.frame}/${fmcLast}`
+                      : '⏺ 전체 자동 녹화'}
+                  </button>
+                </>
+              )}
             </div>
+            {fmcRecorder.error && <div className="record-error">녹화 오류: {fmcRecorder.error}</div>}
             {fmc.status !== 'ready' && (
               <div className="overlay">
                 <div className={`overlay-card${fmc.status === 'error' ? ' error' : ''}`}>
@@ -228,11 +265,12 @@ export default function App() {
               basis={fmc.basis}
               onPickFiles={() => csvInputRef.current?.click()}
               onPickFolder={() => csvFolderInputRef.current?.click()}
+              recorder={fmcRecorder}
             />
             <p className="hint">
-              VRM 아바타는 아직 안 붙였습니다 — 좌표계가 맞는지 스틱맨으로 먼저
-              확인하는 단계입니다. 드래그로 돌려보며 사람이 똑바로 서서
-              정면을 보는지 확인하세요.
+              "전체 자동 녹화"를 누르면 0번 프레임부터 끝까지 재생하며 녹화하고
+              마지막 프레임에서 자동으로 멈춰 파일로 저장합니다. 저장 전에
+              드래그로 시점을 맞춰두면 그 각도로 담깁니다.
             </p>
           </aside>
         </main>

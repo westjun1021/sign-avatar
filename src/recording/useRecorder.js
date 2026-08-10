@@ -7,9 +7,33 @@ import fixWebmDuration from 'fix-webm-duration';
 // SkeletonAvatar 가 setAnimationLoop 로 매 프레임 그리고 있으므로 괜찮지만,
 // 카메라를 멈추면 그림이 안 바뀌므로 호출부에서 녹화도 같이 멈춰야 한다.
 
-// 녹화 프레임레이트. 캔버스 렌더 fps 가 16~28 로 출렁여도 이 간격으로 고정해서 넣는다.
+// 녹화 프레임레이트 기본값. 캔버스 렌더 fps 가 16~28 로 출렁여도 이 간격으로 고정해서 넣는다.
 // (불규칙한 프레임 타임스탬프가 길이와 어긋나면서 긴 영상에서 탐색이 깨졌다.)
+// start(canvas, { fps }) 로 덮어쓸 수 있다 — FreeMoCap 재생은 소스가 15fps 라 그 값을 넘긴다.
 const RECORD_FPS = 24;
+
+// 저장 파일 이름 앞부분 기본값. start(canvas, { name }) 로 덮어쓸 수 있다.
+const DEFAULT_NAME = 'sign-avatar';
+
+// --- 탐색(seek) 개선 ---
+// MediaRecorder 로 만든 webm 은 키프레임이 드물어서 재생기에서 중간을 못 짚는다.
+// duration 은 이미 measureBlobDuration → fixWebmDuration 으로 심어 뒀으니(C-1c)
+// 남은 문제는 "짚을 지점 자체가 없다"는 것이다. 두 가지로 완화한다.
+//
+// 1) timeslice 를 짧게 준다. ondataavailable 이 끊는 지점마다 새 Cluster 가
+//    열리고, 크로미움은 Cluster 를 키프레임으로 시작한다 → 탐색 포인트가 늘어난다.
+//    1000ms 로는 1초에 하나뿐이라 250ms 로 줄인다(초당 4개). 대신 파일이 조금 커진다.
+//    (파이어폭스는 timeslice 가 키프레임 생성에 영향을 주지 않는다 — bugzilla 1666487)
+const TIMESLICE_MS = 250;
+// 2) 키프레임 간격을 직접 요청한다. W3C MediaStream Recording 의
+//    MediaRecorderOptions.videoKeyFrameIntervalDuration 으로, 크로미움이 구현했다.
+//    모르는 키는 WebIDL 규칙상 무시되므로 미지원 브라우저에서도 안전하다(1번만 적용됨).
+const KEY_FRAME_INTERVAL_MS = 250;
+//
+// 그래도 webm + MediaRecorder 조합의 구조적 한계라 완벽한 탐색은 안 된다
+// (Cues/SeekHead 색인이 아예 없어서 재생기가 클러스터를 순차로 훑어야 한다).
+// 완전한 탐색은 mp4 로 변환(ffmpeg.wasm)해서 moov/stss 를 만들어야 한다 — 후속 과제.
+// 사파리 등에서 mimeType 이 video/mp4 로 잡히면 이 문제 자체가 없다.
 
 // 브라우저마다 지원이 다르다. 크롬은 보통 webm, 사파리·일부 크롬은 mp4.
 const MIME_CANDIDATES = [
@@ -150,8 +174,14 @@ export function useRecorder() {
     }
   };
 
-  const start = useCallback((canvas) => {
+  // options (전부 선택): { fps, name }
+  //  - fps  : 프레임을 밀어 넣는 간격. 소스 fps 와 맞춰야 영상 길이가 실제와 같아진다.
+  //  - name : 저장 파일 이름 앞부분.
+  // 안 주면 지금까지와 똑같이 동작한다(실시간 녹화 경로는 그대로).
+  const start = useCallback((canvas, options) => {
     if (!canvas || !supported || recorderRef.current) return;
+    const fps = options?.fps > 0 ? options.fps : RECORD_FPS;
+    const name = options?.name || DEFAULT_NAME;
     try {
       // 고정 프레임레이트 강제:
       // captureStream(0) 은 브라우저 자동 캡처를 끄고, 우리가 requestFrame() 을
@@ -164,12 +194,15 @@ export function useRecorder() {
       if (!manual) {
         // 파이어폭스 등 requestFrame 미지원 → 브라우저 자동 캡처로 폴백
         stream.getTracks().forEach((t) => t.stop());
-        stream = canvas.captureStream(RECORD_FPS);
+        stream = canvas.captureStream(fps);
         track = stream.getVideoTracks()[0];
       }
       streamRef.current = stream;
 
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        videoKeyFrameIntervalDuration: KEY_FRAME_INTERVAL_MS,
+      });
       chunksRef.current = [];
 
       recorder.ondataavailable = (e) => {
@@ -218,7 +251,7 @@ export function useRecorder() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `sign-avatar-${timestamp()}.${ext}`;
+        a.download = `${name}-${timestamp()}.${ext}`;
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -227,8 +260,8 @@ export function useRecorder() {
       };
       recorder.onerror = (e) => setError(e?.error?.message || '녹화 중 오류');
 
-      // 1초마다 청크를 받아 메모리에 한 번에 쌓이지 않게 한다
-      recorder.start(1000);
+      // 청크를 자주 받아 메모리에 한 번에 쌓이지 않게 하고, 동시에 탐색 포인트도 늘린다
+      recorder.start(TIMESLICE_MS);
       recorderRef.current = recorder;
 
       if (manual) {
@@ -240,7 +273,7 @@ export function useRecorder() {
           }
         };
         requestFrame(); // 첫 프레임은 바로
-        frameTimerRef.current = setInterval(requestFrame, 1000 / RECORD_FPS);
+        frameTimerRef.current = setInterval(requestFrame, 1000 / fps);
       }
       setError(null);
       setIsRecording(true);

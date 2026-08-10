@@ -39,6 +39,10 @@ export function classifyFiles(files) {
 export function useFreeMocap() {
   const clipRef = useRef(null);
   const frameRef = useRef(0);
+  // 재생이 끝에서 처음으로 돌아갈지 여부. 전체 녹화(F-4)만 false 로 쓴다.
+  const loopRef = useRef(true);
+  // 끝까지 재생했을 때 한 번만 부를 콜백 (녹화 정지용)
+  const onEndRef = useRef(null);
 
   const [clip, setClip] = useState(null);
   const [status, setStatus] = useState('idle'); // idle | loading | ready | error
@@ -60,6 +64,7 @@ export function useFreeMocap() {
     frame: 0,
     transform: DEFAULT_TRANSFORM,
     basis: null,
+    cleanView: false, // 녹화용 클린 뷰(F-4). 보기 토글과 별개로 렌더 루프에서만 덮어쓴다.
     ...view,
   });
 
@@ -141,11 +146,25 @@ export function useFreeMocap() {
       const advance = Math.floor(acc * PLAY_FPS);
       if (advance > 0) {
         acc -= advance / PLAY_FPS;
-        // 끝나면 처음으로 (동작을 반복해서 보며 축을 맞추기 좋다)
-        const nextFrame = (frameRef.current + advance) % clip.frameCount;
+        let nextFrame = frameRef.current + advance;
+        let ended = false;
+        if (nextFrame >= clip.frameCount) {
+          // 기본은 끝나면 처음으로 (동작을 반복해서 보며 축을 맞추기 좋다).
+          // playAll() 로 들어왔으면 마지막 프레임에 멈추고 콜백을 부른다.
+          if (loopRef.current) nextFrame %= clip.frameCount;
+          else { nextFrame = clip.frameCount - 1; ended = true; }
+        }
         frameRef.current = nextFrame;
         stateRef.current.frame = nextFrame;
         setFrame(nextFrame);
+        if (ended) {
+          const onEnd = onEndRef.current;
+          onEndRef.current = null;
+          loopRef.current = true;
+          setPlaying(false); // 이 effect 의 cleanup 이 rAF 를 취소한다
+          if (onEnd) onEnd();
+          return;
+        }
       }
       raf = requestAnimationFrame(step);
     };
@@ -155,11 +174,37 @@ export function useFreeMocap() {
 
   const togglePlay = useCallback(() => setPlaying((p) => !p), []);
 
+  // 0번 프레임부터 끝까지 한 번만 재생한다. 마지막 프레임에서 멈추고 onEnd 를 부른다.
+  // 프레임이 없으면 아무것도 안 하고 false 를 돌려준다.
+  const playAll = useCallback((onEnd) => {
+    if (!(clipRef.current?.frameCount > 0)) return false;
+    seek(0);
+    loopRef.current = false;
+    onEndRef.current = onEnd || null;
+    setPlaying(true);
+    return true;
+  }, [seek]);
+
+  // playAll 을 중간에 접는다 (모드 전환·사용자 취소). 다음 재생은 다시 루프.
+  const stopPlayAll = useCallback(() => {
+    loopRef.current = true;
+    onEndRef.current = null;
+    setPlaying(false);
+  }, []);
+
+  // 녹화용 클린 뷰 on/off. React state 를 안 거치고 렌더 루프가 읽는 ref 에 바로 써서
+  // 다음 프레임부터 곧바로 반영되게 한다(녹화 시작 직전에 켜야 하므로 한 박자도 늦으면 안 된다).
+  const setCleanView = useCallback((on) => {
+    stateRef.current.cleanView = !!on;
+  }, []);
+
   return {
     clipRef, stateRef,
     clip, status, error, fileNames,
     frame, seek,
     playing, setPlaying, togglePlay,
+    playAll, stopPlayAll,
+    setCleanView,
     transform, setTransform,
     view, setView,
     basis,

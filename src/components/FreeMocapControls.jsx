@@ -9,9 +9,12 @@ export default function FreeMocapControls({
   view, setView,
   basis,
   onPickFiles, onPickFolder,
+  recorder,
 }) {
   const total = clip?.frameCount || 0;
   const last = Math.max(0, total - 1);
+  // 자동 녹화 중에는 재생 위치를 못 건드리게 잠근다 (중간에 튀면 영상이 망가진다)
+  const locked = recorder.auto;
   const set = (patch) => setTransform((t) => ({ ...t, ...patch }));
   const toggleView = (key) => setView((v) => ({ ...v, [key]: !v[key] }));
   const flip = (key) => set({ [key]: transform[key] > 0 ? -1 : 1 });
@@ -23,8 +26,8 @@ export default function FreeMocapControls({
       <div className="fmc-section">
         <div className="fmc-title">데이터</div>
         <div className="source-buttons">
-          <button onClick={onPickFiles} disabled={status === 'loading'}>CSV 3개 선택</button>
-          <button className="secondary" onClick={onPickFolder} disabled={status === 'loading'}>
+          <button onClick={onPickFiles} disabled={status === 'loading' || locked}>CSV 3개 선택</button>
+          <button className="secondary" onClick={onPickFolder} disabled={status === 'loading' || locked}>
             폴더 선택
           </button>
         </div>
@@ -47,9 +50,9 @@ export default function FreeMocapControls({
       <div className="fmc-section">
         <div className="fmc-title">재생</div>
         <div className="fmc-transport">
-          <button className="secondary step" onClick={() => seek(frame - 1)} disabled={!total} title="이전 프레임">◀</button>
-          <button onClick={togglePlay} disabled={!total}>{playing ? '❙❙ 일시정지' : '▶ 재생'}</button>
-          <button className="secondary step" onClick={() => seek(frame + 1)} disabled={!total} title="다음 프레임">▶</button>
+          <button className="secondary step" onClick={() => seek(frame - 1)} disabled={!total || locked} title="이전 프레임">◀</button>
+          <button onClick={togglePlay} disabled={!total || locked}>{playing ? '❙❙ 일시정지' : '▶ 재생'}</button>
+          <button className="secondary step" onClick={() => seek(frame + 1)} disabled={!total || locked} title="다음 프레임">▶</button>
         </div>
         <input
           className="fmc-slider"
@@ -59,9 +62,52 @@ export default function FreeMocapControls({
           step={1}
           value={Math.min(frame, last)}
           onChange={(e) => seek(Number(e.target.value))}
-          disabled={!total}
+          disabled={!total || locked}
         />
         <div className="fmc-frame">frame {total ? frame : 0} / {last}</div>
+      </div>
+
+      <div className="fmc-section">
+        <div className="fmc-title">녹화</div>
+        <div className="fmc-transport">
+          <button
+            className={recorder.isRecording && !recorder.auto ? '' : 'secondary'}
+            onClick={recorder.toggle}
+            disabled={!total || !recorder.supported || recorder.auto}
+            title={recorder.supported
+              ? '지금 보이는 화면을 파일로 녹화합니다'
+              : '이 브라우저는 MediaRecorder 를 지원하지 않습니다'}
+          >
+            {recorder.isRecording && !recorder.auto ? '■ 정지' : '● 녹화'}
+          </button>
+          <button
+            onClick={recorder.auto ? recorder.cancel : recorder.startAuto}
+            disabled={!total || !recorder.supported || (recorder.isRecording && !recorder.auto)}
+            title={`0 번 프레임부터 ${last} 번까지 재생하며 통째로 녹화하고 자동으로 멈춥니다`}
+          >
+            {recorder.auto ? '■ 자동 녹화 취소' : '⏺ 전체 자동 녹화'}
+          </button>
+        </div>
+        <label className={`toggle ${recorder.cleanView ? 'on' : ''}`}>
+          <input
+            type="checkbox"
+            checked={recorder.cleanView}
+            onChange={() => recorder.setCleanView((v) => !v)}
+            disabled={recorder.isRecording || recorder.auto}
+          />
+          <span>클린 뷰 (아바타만)</span>
+        </label>
+        {recorder.error ? (
+          <p className="fmc-note error">녹화 오류: {recorder.error}</p>
+        ) : (
+          <p className="fmc-note">
+            {recorder.auto
+              ? `녹화 중 · frame ${frame} / ${last}`
+              : recorder.isRecording
+                ? '녹화 중 · 정지를 누르면 파일로 저장됩니다'
+                : `클린 뷰로 녹화하면 스켈레톤·바닥선을 빼고 아바타만 담깁니다. 저장 fps 는 재생과 같은 ${PLAY_FPS}fps 입니다.`}
+          </p>
+        )}
       </div>
 
       <div className="fmc-section">

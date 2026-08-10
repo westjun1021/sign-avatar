@@ -22,11 +22,26 @@ import {
 } from './fmcLandmarks.js';
 import { place3D, frameCenter, transformHandedness, DEFAULT_TRANSFORM } from './transform.js';
 
-// 카메라 프레이밍. 자동 정렬 + AXIS_SCALE 2.0 기준으로 이 녹화의 전신이
-// y -1.61 ~ +0.87 에 들어온다(실측). fov 45 / z 3.6 이면 세로 반높이가 1.49 라
-// 타깃 y -0.35 기준으로 -1.84 ~ +1.14 가 보인다 → 머리부터 발끝까지 다 들어온다.
-const FRAME_Y = -0.35;
-const FRAME_Z = 3.6;
+// 카메라 프레이밍 — 뉴스 수어 통역사처럼 머리~허리 흉상만 크게 (실시간 모드 D-1 과 같은 방식).
+//
+// 이 무대의 원점은 바닥이 아니라 "몸통 중심(trunk_center)"이다. 자동 정렬 +
+// AXIS_SCALE 2.0 기준으로 이 녹화의 전신이 y -1.61 ~ +0.87 에 들어온다(실측).
+// 즉 키 H = 2.48 이고 바닥이 -1.61 이므로, 사람 비율로 환산하면:
+//   머리끝 +0.87  어깨 +0.42  가슴 +0.18  골반 -0.30  무릎 -0.94  발 -1.61
+// (_fitVrm 이 VRM 의 골반·어깨너비를 스켈레톤에 맞춰 세우므로 아바타도 같은 범위다)
+//
+// 흉상(골반 -0.30 ~ 머리끝 +0.87)은 높이 1.17, 세로 중심이 +0.285 다.
+// fov 45 / z 2.0 이면 세로 반높이가 0.83 → 타깃 y 0.30 기준 -0.53 ~ +1.13 이 보인다.
+//   머리 위 0.26 여백 (손을 머리 위로 들어도 여유) / 아래는 골반보다 0.23 더
+//   내려간 허벅지 위쪽에서 잘림 → 무릎·발은 화면 밖(의도한 대로).
+//   흉상이 화면 세로의 약 70% 를 채운다.
+//
+// 팔을 옆으로 뻗은 손이 좌우로 잘리면 FMC_FRAME_Z 를 키워 여유를 준다
+// (2.0 → 2.2 면 좌우가 10% 넓어지는 대신 흉상 비중이 64% 로 내려간다).
+// 크기 슬라이더(transform.scale)를 기본 2.0 에서 움직이면 아바타만 커지고
+// 카메라는 그대로라 확대/축소처럼 동작한다 — 그건 원래 의도한 조작이다.
+const FMC_FRAME_Y = 0.30;
+const FMC_FRAME_Z = 2.0;
 
 const BONE_WIDTH = 3.5;
 const JOINT_SIZE = 0.06;
@@ -37,6 +52,13 @@ const JOINT_SIZE = 0.06;
 const GRID_SIZE = 4;
 const GRID_DIVISIONS = 8;
 const GRID_FALLBACK_Y = -1.7; // 기준축을 못 구했을 때(수동 모드)의 고정 높이
+
+// 녹화(F-4) 관련. 실시간 모드(SkeletonAvatar)와 같은 이유·같은 값이다.
+// preserveDrawingBuffer 가 없으면 captureStream 이 간헐적으로 검은 프레임을 집는다.
+const PRESERVE_DRAWING_BUFFER = true;
+// 캔버스가 투명(alpha 0)이면 녹화 파일에서 검게 찍힌다(mp4 는 알파가 아예 없다).
+// 그래서 녹화 중에만 이 색으로 지우고, 끝나면 다시 투명으로 돌려 CSS 그라데이션을 살린다.
+const RECORD_CLEAR_COLOR = 0x111825;
 
 const VRM_URL = '/avatar.vrm';
 // 기준축을 못 구해 실측 맞춤을 못 할 때의 폴백 (수동 모드에서 축이 엉망일 때)
@@ -73,17 +95,21 @@ export class FreeMocapPlayer {
     const h = container.clientHeight || 480;
 
     this.scene = new THREE.Scene();
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: PRESERVE_DRAWING_BUFFER, // 녹화 시 검은 프레임 방지
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
-    this.camera.position.set(0, FRAME_Y, FRAME_Z);
+    this.camera.position.set(0, FMC_FRAME_Y, FMC_FRAME_Z);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
-    this.controls.target.set(0, FRAME_Y, 0);
+    this.controls.target.set(0, FMC_FRAME_Y, 0);
     this.camera.lookAt(this.controls.target);
     this.controls.update();
     this._homePos = this.camera.position.clone();
@@ -261,10 +287,14 @@ export class FreeMocapPlayer {
     const st = this.stateRef.current || {};
     const transform = st.transform || DEFAULT_TRANSFORM;
     const basis = st.basis || null;
-    const showSkeleton = st.showSkeleton !== false;
-    const showAvatar = st.showAvatar !== false;
+    // 녹화용 클린 뷰: 아바타만 남기고 스켈레톤·격자를 뺀다.
+    // 사용자의 보기 토글을 건드리지 않고 여기서만 덮어쓰므로, 녹화가 끝나면
+    // 플래그를 내리는 것만으로 화면이 원래대로 돌아온다.
+    const clean = st.cleanView === true;
+    const showSkeleton = !clean && st.showSkeleton !== false;
+    const showAvatar = clean || st.showAvatar !== false;
 
-    this.grid.visible = st.showGrid !== false;
+    this.grid.visible = !clean && st.showGrid !== false;
     this.grid.position.y = (transform.mode === 'auto' && basis)
       ? -basis.floorDrop * transform.scale
       : GRID_FALLBACK_Y;
@@ -327,6 +357,19 @@ export class FreeMocapPlayer {
 
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+  }
+
+  // 녹화 대상 캔버스 = 이 무대의 렌더러. 아바타·스켈레톤이 같은 씬에 있으므로
+  // "아바타만" 담고 싶으면 stateRef.cleanView 를 켜서 스켈레톤·격자를 빼면 된다.
+  getMainCanvas() {
+    return this.renderer ? this.renderer.domElement : null;
+  }
+
+  // 녹화 중에만 단색 배경으로 지운다. 끄면 다시 투명(=CSS 배경이 비침).
+  setRecordingBackground(on) {
+    if (!this.renderer) return;
+    if (on) this.renderer.setClearColor(RECORD_CLEAR_COLOR, 1);
+    else this.renderer.setClearColor(0x000000, 0);
   }
 
   resetView() {
