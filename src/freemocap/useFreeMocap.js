@@ -52,9 +52,12 @@ export function useFreeMocap() {
   const [playing, setPlaying] = useState(false);
   const [transform, setTransform] = useState(DEFAULT_TRANSFORM);
   // 아바타와 스켈레톤을 둘 다 켜두는 게 기본 — 팔 방향이 맞는지 겹쳐서 대조하려면 필요하다.
+  // bodyPush 는 보기 옵션이 아니라 리타깃 보정(F-5)이지만, 켠/끈 차이를 눈으로
+  // 비교하며 튜닝해야 해서 같은 토글 묶음에 뒀다.
   const [view, setView] = useState({
     showAvatar: true, showSkeleton: true,
     showLower: true, showHands: true, showGrid: true,
+    bodyPush: true,
   });
 
   // 자동 정렬 기준축은 클립 전체에서 한 번만 구한다 (프레임마다 구하면 몸통 회전이 지워진다)

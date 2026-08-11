@@ -15,6 +15,9 @@ import {
 } from '../three/stickFigure.js';
 // 팔·손목·손가락 리타깃은 실시간 모드와 같은 코드다. 좌표 변환만 place3D 로 갈아끼운다.
 import { BoneRetargeter } from '../three/retarget.js';
+// 리타깃 뒤에 손목만 몸통 밖으로 밀어내는 보정(F-5). 재생 모드 전용이다 —
+// 사람 몸통과 아바타 몸통의 두께 차이는 실측 3D 좌표를 쓸 때 특히 두드러진다.
+import { BodyPusher } from '../three/bodyPush.js';
 import {
   FMC_UPPER_CONNECTIONS, FMC_FULL_CONNECTIONS,
   FMC_UPPER_JOINTS, FMC_FULL_JOINTS,
@@ -90,6 +93,8 @@ export class FreeMocapPlayer {
     // 손 21점의 NaN 을 걸러 담을 재사용 배열 (매 프레임 새로 만들지 않으려고)
     this._handL = new Array(21);
     this._handR = new Array(21);
+    // 몸통 파고듦 완화 (F-5). 리타깃과 별개의 후처리라 상태도 따로 둔다.
+    this._pusher = new BodyPusher();
 
     const w = container.clientWidth || 640;
     const h = container.clientHeight || 480;
@@ -234,7 +239,8 @@ export class FreeMocapPlayer {
   //
   // 순서는 실시간 모드와 동일: 팔(위→아래) → 손목 → 손가락.
   // 자식이 부모의 "현재" 월드 회전을 읽어 부모 공간으로 옮기므로 순서가 바뀌면 안 된다.
-  _retargetFrame(frame, transform, basis) {
+  // 몸통 파고듦 보정(F-5)은 아래팔 회전을 고쳐 쓰므로 그 사이(팔 뒤 · 손목 앞)에 들어간다.
+  _retargetFrame(frame, transform, basis, bodyPush) {
     const humanoid = this.vrm.humanoid;
     if (!humanoid) return;
 
@@ -246,6 +252,13 @@ export class FreeMocapPlayer {
       this._clean(frame.left_shoulder), this._clean(frame.left_elbow), this._clean(frame.left_wrist), L);
     this._retarget.applyArm(humanoid,
       this._clean(frame.right_shoulder), this._clean(frame.right_elbow), this._clean(frame.right_wrist), R);
+
+    // 손목이 몸통 안으로 들어갔으면 아래팔을 앞으로 조금 돌려 표면에서 멈추게 한다.
+    // 몸에서 먼 동작에는 아무 영향이 없다(몸통 상자 밖이면 밀기 세기가 0).
+    if (bodyPush && this._pusher.update(this.vrm)) {
+      this._pusher.push(humanoid, L);
+      this._pusher.push(humanoid, R);
+    }
 
     const leftHand = this._cleanHand(frame.leftHand, this._handL);
     const rightHand = this._cleanHand(frame.rightHand, this._handR);
@@ -351,7 +364,9 @@ export class FreeMocapPlayer {
     // 수렴하므로, 슬라이더로 멈춘 프레임의 최종 자세를 그대로 볼 수 있다.
     if (this.vrm) {
       this._fitVrm(transform, basis);
-      if (frame && center && showAvatar) this._retargetFrame(frame, transform, basis);
+      if (frame && center && showAvatar) {
+        this._retargetFrame(frame, transform, basis, st.bodyPush !== false);
+      }
       this.vrm.update(this._clock.getDelta());
     }
 

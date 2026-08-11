@@ -137,6 +137,13 @@ export default function FreeMocapControls({
             <input type="checkbox" checked={transform.mirror} onChange={() => set({ mirror: !transform.mirror })} />
             <span>좌우 반전</span>
           </label>
+          <label
+            className={`toggle ${view.bodyPush ? 'on' : ''}`}
+            title="손목이 아바타 몸통 안으로 들어가면 아래팔을 앞으로 조금 돌려 표면에서 멈추게 합니다"
+          >
+            <input type="checkbox" checked={view.bodyPush} onChange={() => toggleView('bodyPush')} />
+            <span>몸통 파고듦 완화</span>
+          </label>
         </div>
       </div>
 
