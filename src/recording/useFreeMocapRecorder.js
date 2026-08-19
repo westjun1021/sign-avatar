@@ -52,9 +52,11 @@ export function useFreeMocapRecorder(fmc, playerRef) {
     return true;
   };
 
+  // 배경은 무대에서 고른 단색(F-6)이 그대로 녹화된다 — 크로마 그린/블루를 골라
+  // 클린 뷰로 녹화하면 합성용 소스가 바로 나온다. 카메라도 화면의 라이브 카메라를
+  // 그대로 캡처하므로 "수어 표준 뷰"를 눌러둔 각도가 그대로 담긴다.
   const beginView = () => {
     if (cleanRef.current) fmcRef.current.setCleanView(true);
-    playerRef.current?.setRecordingBackground(true);
   };
 
   // 녹화를 닫고 화면을 원래대로 되돌린다. 녹화 중이 아니어도 안전하다.
@@ -65,7 +67,6 @@ export function useFreeMocapRecorder(fmc, playerRef) {
     setAuto(false);
     recorder.stop();
     fmcRef.current.setCleanView(false);
-    playerRef.current?.setRecordingBackground(false);
   };
 
   // 수동 녹화 토글 (실시간 모드의 ● 녹화 / ■ 정지 와 같은 동작)

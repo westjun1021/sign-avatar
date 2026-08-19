@@ -111,6 +111,32 @@ body {
 }
 .tool-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .tool-btn:disabled { opacity: 0.45; }
+
+/* 배경색 스와치 (검 / 흰 / 크로마 그린 / 크로마 블루) */
+.bg-swatches {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(20, 26, 36, 0.78);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(4px);
+}
+.bg-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 5px;
+  /* 검정 스와치가 패널에 묻히지 않게 항상 테두리를 준다 */
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+}
+.bg-swatch:hover { border-color: rgba(255, 255, 255, 0.6); }
+.bg-swatch.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
 /* 녹화 중: 빨간 표시 */
 .tool-btn.record.on { color: var(--danger); border-color: var(--danger); }
 .tool-btn.record.on:hover { color: var(--danger); border-color: var(--danger); filter: brightness(1.15); }

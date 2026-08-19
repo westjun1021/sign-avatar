@@ -24,6 +24,7 @@ import {
   FMC_HAND_CONNECTIONS,
 } from './fmcLandmarks.js';
 import { place3D, frameCenter, transformHandedness, DEFAULT_TRANSFORM } from './transform.js';
+import { BACKGROUNDS, DEFAULT_BACKGROUND } from './background.js';
 
 // 카메라 프레이밍 — 뉴스 수어 통역사처럼 머리~허리 흉상만 크게 (실시간 모드 D-1 과 같은 방식).
 //
@@ -45,6 +46,45 @@ import { place3D, frameCenter, transformHandedness, DEFAULT_TRANSFORM } from './
 // 카메라는 그대로라 확대/축소처럼 동작한다 — 그건 원래 의도한 조작이다.
 const FMC_FRAME_Y = 0.30;
 const FMC_FRAME_Z = 2.0;
+const FMC_FOV = 45;
+
+// --- 수어 표준 뷰 (F-6) -------------------------------------------------
+// 최종 산출물이 mp4 이고 여러 클립을 잘라 붙이므로, 카메라 각도가 클립마다
+// 정확히 같아야 한다. 그래서 이 뷰는 "재생 중인 데이터"를 전혀 안 본다 —
+// 오직 아바타 실측치(어깨너비·눈높이·머리끝·가슴)만으로 pose 를 계산한다.
+// 같은 아바타·같은 크기 슬라이더 값이면 몇 번을 눌러도, 어떤 클립에서 눌러도,
+// 궤도를 돌린 뒤에 눌러도 카메라 좌표가 정확히 같은 값으로 떨어진다.
+//
+// 표준 요건(UNICEF / WCAG 2.1 AAA 등 수어 영상 제작 가이드):
+//   눈높이 · 완전 정면 · 올려다봄/내려다봄 0 · 가슴~머리 위 프레임 ·
+//   좌우 신호 공간 + 마진 · 단색 배경
+//
+// "카메라를 눈높이에 두고 pitch 0" 과 "얼굴이 프레임 상단 1/3" 은 그냥은 동시에
+// 성립하지 않는다(타깃을 내리는 순간 내려다보는 각이 생긴다). 그래서 카메라를
+// 기울이는 대신 렌즈를 시프트한다 — 광축은 눈높이에 수평으로 둔 채 실제보다 큰
+// 가상 프레임을 잡고 그 아래쪽만 잘라 쓴다(camera.setViewOffset). 건축사진의
+// 시프트렌즈와 같은 원리다.
+//
+// 프레임은 위/아래 모서리를 직접 정하고, 눈높이가 프레임 어디쯤 오는지는 그 결과로
+// 따라오게 한다(아래 두 상수의 비율로 정해진다 — 현재 값에서 위에서 약 29%).
+// 눈높이 비율을 고정하고 높이를 max() 로 키우는 방식도 해봤는데, 아래를 넓히면
+// 위쪽 여백이 같이 부풀어 머리 위 공백이 23% 까지 벌어졌다(방송 기준은 5~10%).
+// 얼굴 위치는 STD_TOP_MARGIN 을 줄이면 위로, 늘리면 아래로 간다.
+const STD_FOV = 45;
+// 좌우 마진. 손을 옆으로 크게 뻗는 프레임이 잘리면 이 값(또는 아래 SPAN_W)을 올린다.
+const STD_SIDE_MARGIN = 0.15;
+// 신호 공간 가로폭 = 어깨너비 × 이 값. 수어는 몸 앞 신호 공간 전체를 쓴다.
+// 실측(439 프레임)상 손은 중심에서 어깨너비 0.92 배까지만 벌어져 좌우는 늘 여유가
+// 남는다 — 이 값이 실제로 작동하는 건 세로로 긴(세로형) 화면비일 때다.
+const STD_SIGN_SPAN_W = 2.8;
+// 프레임 위 = 머리끝 + 어깨너비 × 이 값 (머리 위 여백. 작을수록 얼굴이 위로 간다)
+const STD_TOP_MARGIN = 0.55;
+// 프레임 아래 = 가슴 + 어깨너비 × 이 값만큼 아래.
+// 1.25 였을 때 실측 클립에서 손 내리는 구간(frame 412)이 2.6% 잘렸다. 1.55 면
+// 그 최저점 아래로 프레임 높이의 14% 가 남는다 — 요청한 10~15% 마진.
+const STD_BOTTOM_DROP = 1.55;
+// 눈 본이 없는 VRM 의 폴백: head 본에서 어깨너비 × 이 값만큼 위를 눈높이로 본다.
+const STD_EYE_FALLBACK = 0.35;
 
 const BONE_WIDTH = 3.5;
 const JOINT_SIZE = 0.06;
@@ -59,9 +99,8 @@ const GRID_FALLBACK_Y = -1.7; // 기준축을 못 구했을 때(수동 모드)�
 // 녹화(F-4) 관련. 실시간 모드(SkeletonAvatar)와 같은 이유·같은 값이다.
 // preserveDrawingBuffer 가 없으면 captureStream 이 간헐적으로 검은 프레임을 집는다.
 const PRESERVE_DRAWING_BUFFER = true;
-// 캔버스가 투명(alpha 0)이면 녹화 파일에서 검게 찍힌다(mp4 는 알파가 아예 없다).
-// 그래서 녹화 중에만 이 색으로 지우고, 끝나면 다시 투명으로 돌려 CSS 그라데이션을 살린다.
-const RECORD_CLEAR_COLOR = 0x111825;
+// 배경은 항상 불투명 단색(F-6)이라 녹화용 임시 배경 전환이 필요 없다 — 화면에
+// 보이는 배경이 그대로 mp4 에 담긴다(크로마키 색을 고르면 그 색 그대로).
 
 const VRM_URL = '/avatar.vrm';
 // 기준축을 못 구해 실측 맞춤을 못 할 때의 폴백 (수동 모드에서 축이 엉망일 때)
@@ -95,6 +134,9 @@ export class FreeMocapPlayer {
     this._handR = new Array(21);
     // 몸통 파고듦 완화 (F-5). 리타깃과 별개의 후처리라 상태도 따로 둔다.
     this._pusher = new BodyPusher();
+    // 재생 위치 점프 감지용 (스무딩 상태 리셋 판정 — _loop 참고)
+    this._lastClip = null;
+    this._lastIdx = -1;
 
     const w = container.clientWidth || 640;
     const h = container.clientHeight || 480;
@@ -109,7 +151,7 @@ export class FreeMocapPlayer {
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
 
-    this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
+    this.camera = new THREE.PerspectiveCamera(FMC_FOV, w / h, 0.1, 100);
     this.camera.position.set(0, FMC_FRAME_Y, FMC_FRAME_Z);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -120,14 +162,24 @@ export class FreeMocapPlayer {
     this._homePos = this.camera.position.clone();
     this._homeTarget = this.controls.target.clone();
 
-    // 기준 격자/축 (X 빨강 · Y 초록 · Z 파랑)
+    // 표준 뷰 상태. _viewShift 는 렌즈 시프트 비율(픽셀은 창 크기마다 다르므로
+    // 비율만 들고 있다가 _applyViewOffset 에서 그때그때 픽셀로 환산한다).
+    this._viewShift = null;
+    this._standard = false;
+    // 사용자가 궤도를 돌리면 "표준 뷰 고정"을 푼다 — 창 크기가 바뀔 때 사용자가
+    // 맞춰둔 시점을 표준 pose 로 덮어쓰지 않기 위해서다.
+    this.controls.addEventListener('start', () => { this._standard = false; });
+
+    // 기준 격자/축 (X 빨강 · Y 초록 · Z 파랑).
+    // 격자는 배경색에 따라 색이 달라져 _applyBackground 가 만든다.
     this.grid = new THREE.Group();
-    this.grid.add(
-      new THREE.GridHelper(GRID_SIZE, GRID_DIVISIONS, 0x3a4557, 0x232c3a),
-      new THREE.AxesHelper(0.5) // X 빨강 · Y 초록 · Z 파랑
-    );
+    this.gridHelper = null;
+    this.grid.add(new THREE.AxesHelper(0.5)); // X 빨강 · Y 초록 · Z 파랑
     this.grid.position.y = GRID_FALLBACK_Y;
     this.scene.add(this.grid);
+
+    this._bg = null;
+    this._applyBackground(DEFAULT_BACKGROUND);
 
     // 뼈대 선 — 최대 개수로 잡아두고 매 프레임 앞쪽만 채운다
     this.bodyLine = makeFatLine(FMC_FULL_CONNECTIONS.length, w, h, { color: COLOR_BONE, linewidth: BONE_WIDTH });
@@ -187,6 +239,11 @@ export class FreeMocapPlayer {
 
   // rest 자세에서 어깨 너비와 골반 높이를 잰다 (scale 1 / position 0 기준).
   // 이 값으로 아바타를 스켈레톤과 같은 크기·높이에 세워서 겹쳐 볼 수 있게 한다.
+  //
+  // 표준 뷰(F-6)용 세로 기준점(눈·가슴·머리끝)도 여기서 같이 잰다. 전부 rest 자세의
+  // 로컬 Y 라, 나중에 `scene.position.y + y * scale` 로 현재 월드 높이가 나온다.
+  // 리타깃은 팔·손목·손가락만 건드리므로(척추·목·머리는 rest 그대로) 이 값들은
+  // 재생 프레임과 무관하게 항상 같다 — 표준 뷰가 결정론적인 이유다.
   _measureVrm(vrm) {
     const humanoid = vrm.humanoid;
     if (!humanoid) return null;
@@ -201,7 +258,29 @@ export class FreeMocapPlayer {
     if (!la || !ra || !hips) return null;
     const shoulderWidth = la.distanceTo(ra);
     if (!(shoulderWidth > 1e-6)) return null;
-    return { shoulderWidth, hipsY: hips.y };
+
+    // 눈높이: 눈 본이 있으면 그 평균, 없으면 head 본에서 조금 위 (VRM 의 head 본은
+    // 두개골 아래쪽이라 그대로 쓰면 눈보다 낮다).
+    const eyeL = world('leftEye');
+    const eyeR = world('rightEye');
+    const head = world('head');
+    let eyeY = null;
+    if (eyeL && eyeR) eyeY = (eyeL.y + eyeR.y) / 2;
+    else if (eyeL || eyeR) eyeY = (eyeL || eyeR).y;
+    else if (head) eyeY = head.y + shoulderWidth * STD_EYE_FALLBACK;
+
+    // 가슴 중앙. upperChest 가 없는 모델이 흔해서 chest → spine 으로 폴백한다.
+    const chest = world('upperChest') || world('chest') || world('spine');
+    const chestY = chest ? chest.y : hips.y + shoulderWidth;
+
+    // 머리끝: 본이 아니라 실제 메시 바운딩(머리카락 포함)을 쓴다 — 머리 위 여백을
+    // "보이는 실루엣" 기준으로 잡아야 헤어가 잘리지 않는다.
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    const headTopY = Number.isFinite(box.max.y)
+      ? box.max.y
+      : (eyeY != null ? eyeY + shoulderWidth * 0.5 : hips.y + shoulderWidth * 3);
+
+    return { shoulderWidth, hipsY: hips.y, eyeY, chestY, headTopY };
   }
 
   // 아바타를 이번 transform 기준으로 스켈레톤과 같은 크기·높이에 맞춘다.
@@ -307,6 +386,9 @@ export class FreeMocapPlayer {
     const showSkeleton = !clean && st.showSkeleton !== false;
     const showAvatar = clean || st.showAvatar !== false;
 
+    // 배경색(F-6). 바뀔 때만 실제 작업을 한다 — 안 바뀌면 비교 한 번으로 끝난다.
+    this._applyBackground(st.bg || DEFAULT_BACKGROUND);
+
     this.grid.visible = !clean && st.showGrid !== false;
     this.grid.position.y = (transform.mode === 'auto' && basis)
       ? -basis.floorDrop * transform.scale
@@ -317,9 +399,19 @@ export class FreeMocapPlayer {
     this._transform = transform;
     this._basis = basis;
 
-    const frame = (clip && clip.frameCount > 0)
-      ? clip.frames[Math.max(0, Math.min(clip.frameCount - 1, Math.round(st.frame || 0)))]
-      : null;
+    const idx = (clip && clip.frameCount > 0)
+      ? Math.max(0, Math.min(clip.frameCount - 1, Math.round(st.frame || 0)))
+      : -1;
+    // 재생 위치가 뒤로 돌아가거나(처음부터 다시 재생) 크게 앞으로 뛰면(슬라이더 스크럽),
+    // 또는 클립 자체가 바뀌면 리타깃 스무딩 상태를 비운다. 안 비우면 첫 프레임이
+    // 직전 상태에 끌려 튄다. 정상 재생은 프레임당 1~2 칸이라 걸리지 않는다.
+    if (clip !== this._lastClip || idx < this._lastIdx || idx > this._lastIdx + 10) {
+      this._retarget.resetSmoothing();
+    }
+    this._lastClip = clip;
+    this._lastIdx = idx;
+
+    const frame = idx >= 0 ? clip.frames[idx] : null;
     // 중심을 못 구한 프레임(전신 추적 실패)에는 직전 중심을 그대로 쓴다 — 몸이 튀지 않게.
     const center = frame ? (frameCenter(frame) || this._center) : null;
     this._center = center;
@@ -380,18 +472,113 @@ export class FreeMocapPlayer {
     return this.renderer ? this.renderer.domElement : null;
   }
 
-  // 녹화 중에만 단색 배경으로 지운다. 끄면 다시 투명(=CSS 배경이 비침).
-  setRecordingBackground(on) {
-    if (!this.renderer) return;
-    if (on) this.renderer.setClearColor(RECORD_CLEAR_COLOR, 1);
-    else this.renderer.setClearColor(0x000000, 0);
+  // 배경색을 바꾼다 (검/흰/크로마 그린/크로마 블루). 조명·아바타·스켈레톤은 안 건드린다.
+  // 격자는 정점 색으로 구워져 있어 머티리얼만 못 바꾸므로 헬퍼를 다시 만든다
+  // (배경이 바뀔 때만 도는 경로라 비용은 무시할 수준).
+  _applyBackground(key) {
+    if (key === this._bg) return;
+    const bg = BACKGROUNDS[key] || BACKGROUNDS[DEFAULT_BACKGROUND];
+    this._bg = BACKGROUNDS[key] ? key : DEFAULT_BACKGROUND;
+
+    // scene.background 가 알파 1 로 지우므로 녹화 파일에도 이 색이 그대로 담긴다.
+    if (this.scene.background instanceof THREE.Color) this.scene.background.setHex(bg.color);
+    else this.scene.background = new THREE.Color(bg.color);
+    this.renderer.setClearColor(bg.color, 1);
+
+    if (this.gridHelper) {
+      this.grid.remove(this.gridHelper);
+      this.gridHelper.geometry.dispose();
+      this.gridHelper.material.dispose();
+    }
+    this.gridHelper = new THREE.GridHelper(GRID_SIZE, GRID_DIVISIONS, bg.grid[0], bg.grid[1]);
+    this.grid.add(this.gridHelper);
+  }
+
+  // 렌즈 시프트를 현재 캔버스 크기에 맞춰 픽셀로 환산해 건다.
+  // 가상 프레임(fullW × fullH)은 실제 프레임의 k 배이고, 실제로 그리는 창을
+  // 그 안에서 아래로 down(프레임 높이 비율)만큼 내린 위치에서 잘라낸다.
+  // 광축은 창 밖으로 나가지 않고 창 안 STD_EYE_LINE 지점에 남는다 → pitch 0 유지.
+  _applyViewOffset() {
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    if (!w || !h) return;
+    if (!this._viewShift) {
+      this.camera.clearViewOffset(); // 내부에서 updateProjectionMatrix 까지 한다
+      return;
+    }
+    const { k, down } = this._viewShift;
+    const fullW = w * k;
+    const fullH = h * k;
+    this.camera.setViewOffset(fullW, fullH, (fullW - w) / 2, (fullH - h) / 2 + down * h, w, h);
+  }
+
+  // 수어 표준 뷰: 아바타 실측치만으로 카메라 pose 를 결정한다 (클립 무관·결정론적).
+  // 눈높이 · 완전 정면 · pitch/roll 0 · 가슴~머리 위 · 좌우 신호 공간 + 마진.
+  // 아바타 계측을 못 하면(VRM 로딩 전 등) 기존 홈 뷰로 폴백한다.
+  standardView() {
+    const fit = this._vrmFit;
+    if (!this.vrm || !fit || fit.eyeY == null) {
+      this.resetView();
+      return false;
+    }
+
+    // _fitVrm 이 매 프레임 맞춰둔 현재 배율·높이. 이걸 통해 rest 실측치를 월드로 옮긴다.
+    const s = this.vrm.scene.scale.x;
+    const baseY = this.vrm.scene.position.y;
+    const toWorld = (y) => baseY + y * s;
+
+    const shoulderW = fit.shoulderWidth * s;
+    const eyeY = toWorld(fit.eyeY);
+    const top = toWorld(fit.headTopY) + shoulderW * STD_TOP_MARGIN;
+    const bottom = toWorld(fit.chestY) - shoulderW * STD_BOTTOM_DROP;
+
+    // 좌우 신호 공간 + 마진. 가로가 모자라면 그만큼 뒤로 빼서 프레임을 키운다
+    // (프레임 중심은 그대로 두고 위아래로 같이 넓어진다).
+    const needW = shoulderW * STD_SIGN_SPAN_W * (1 + STD_SIDE_MARGIN);
+    const frameH = Math.max(top - bottom, needW / (this.camera.aspect || 1), 1e-4);
+    const centerY = (top + bottom) / 2;
+
+    // 광축을 눈높이에 수평으로 두고 프레임만 그 차이만큼 민다.
+    // 가상 프레임을 k 배로 키우고 한쪽을 잘라 쓰므로 거리도 k 배가 된다
+    // (= 더 긴 렌즈로 물러선 셈. 얼굴 원근 왜곡이 줄어 수어 영상에는 오히려 낫다).
+    // 광축이 창 밖으로 나가면 구도가 뒤집히므로 프레임 반높이의 90% 로 묶는다
+    // (현재 상수에서는 0.21 수준이라 걸릴 일이 없다 — 상수를 크게 바꿨을 때의 안전장치).
+    const half = frameH / 2;
+    const shift = Math.min(Math.max(eyeY - centerY, -half * 0.9), half * 0.9);
+    const k = 1 + (2 * Math.abs(shift)) / frameH;
+    const dist = (k * frameH) / 2 / Math.tan((STD_FOV * Math.PI) / 360);
+
+    this.camera.fov = STD_FOV;
+    this._viewShift = Math.abs(shift) > 1e-6 ? { k, down: shift / frameH } : null;
+    this._applyViewOffset();
+    this.camera.updateProjectionMatrix();
+
+    // resetView 와 같은 이유로 damping 을 먼저 끈다 (직전 드래그의 잔여 회전량 제거).
+    this.controls.enableDamping = false;
+    this.controls.update();
+    this.camera.up.set(0, 1, 0);                 // roll 0
+    this.camera.position.set(0, eyeY, dist);     // 정면(+Z) · 눈높이
+    this.controls.target.set(0, eyeY, 0);        // 카메라와 같은 높이 → pitch 0
+    this.camera.lookAt(this.controls.target);
+    this.controls.update();
+    this.controls.enableDamping = true;
+
+    // 창 크기가 바뀌면 프레이밍을 다시 계산해야 같은 구도가 유지된다.
+    this._standard = true;
+    return true;
   }
 
   resetView() {
     // SkeletonAvatar.resetView() 와 같은 이유로 순서가 중요하다: damping 을 끈 채
     // 홈 좌표를 먼저 넣으면 직전 드래그의 잔여 회전량이 통째로 더해져 카메라가 튄다.
+    this._standard = false;
+    this._viewShift = null;      // 표준 뷰의 렌즈 시프트 해제
+    this.camera.fov = FMC_FOV;
+    this._applyViewOffset();
+    this.camera.updateProjectionMatrix();
     this.controls.enableDamping = false;
     this.controls.update();
+    this.camera.up.set(0, 1, 0);
     this.camera.position.copy(this._homePos);
     this.controls.target.copy(this._homeTarget);
     this.controls.update();
@@ -407,6 +594,11 @@ export class FreeMocapPlayer {
     this.renderer.setSize(w, h);
     // LineMaterial 은 px 두께 계산에 렌더러 해상도를 쓴다
     for (const line of this._fatLines) line.material.resolution.set(w, h);
+    // 표준 뷰가 걸려 있으면 새 종횡비로 거리를 다시 잡는다(좌우 마진 유지).
+    // 그 사이 사용자가 궤도를 돌렸으면 _standard 가 꺼져 있으므로 시점을 안 건드리고
+    // 렌즈 시프트만 새 픽셀 크기로 다시 건다.
+    if (this._standard) this.standardView();
+    else this._applyViewOffset();
   }
 
   dispose() {

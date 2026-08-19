@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildClip } from './parseTrajectories.js';
 import { computeBodyBasis, DEFAULT_TRANSFORM } from './transform.js';
+import { DEFAULT_BACKGROUND } from './background.js';
 
 // 촬영 fps. FreeMoCap 녹화가 15fps 라 그대로 재생한다(30 으로 돌리면 2배속이 된다).
 export const PLAY_FPS = 15;
@@ -54,10 +55,13 @@ export function useFreeMocap() {
   // 아바타와 스켈레톤을 둘 다 켜두는 게 기본 — 팔 방향이 맞는지 겹쳐서 대조하려면 필요하다.
   // bodyPush 는 보기 옵션이 아니라 리타깃 보정(F-5)이지만, 켠/끈 차이를 눈으로
   // 비교하며 튜닝해야 해서 같은 토글 묶음에 뒀다.
+  // bg 는 보기 토글은 아니지만 렌더 루프가 읽는 값이라 같은 스냅샷에 실어 보낸다.
+  // (여기 두면 모드를 오갔다 와서 플레이어가 다시 마운트돼도 고른 배경이 복원된다)
   const [view, setView] = useState({
     showAvatar: true, showSkeleton: true,
     showLower: true, showHands: true, showGrid: true,
     bodyPush: true,
+    bg: DEFAULT_BACKGROUND,
   });
 
   // 자동 정렬 기준축은 클립 전체에서 한 번만 구한다 (프레임마다 구하면 몸통 회전이 지워진다)

@@ -3,12 +3,15 @@ import { useHolistic } from './mediapipe/useHolistic.js';
 import { useRecorder } from './recording/useRecorder.js';
 import { useFreeMocapRecorder } from './recording/useFreeMocapRecorder.js';
 import { useFreeMocap } from './freemocap/useFreeMocap.js';
+import { BACKGROUNDS, BACKGROUND_KEYS } from './freemocap/background.js';
 import AvatarStage from './components/AvatarStage.jsx';
 import CameraPanel from './components/CameraPanel.jsx';
 import SkeletonPanel from './components/SkeletonPanel.jsx';
 import Controls from './components/Controls.jsx';
 import FreeMocapStage from './components/FreeMocapStage.jsx';
 import FreeMocapControls from './components/FreeMocapControls.jsx';
+import { useDevAutoload } from './devAutoload.js'; // [임시 · 검증용]
+import { useDevStdView } from './devStdView.js';   // [임시 · 검증용]
 
 export default function App() {
   // 'live' = 웹캠/영상 실시간 추적 + VRM (기존)
@@ -80,6 +83,10 @@ export default function App() {
   const csvFolderInputRef = useRef(null);
   // F-4: 재생 화면 녹화. 실시간 녹화와 완전히 별개의 useRecorder 인스턴스다.
   const fmcRecorder = useFreeMocapRecorder(fmc, fmcPlayerRef);
+  // [임시 · 검증용] ?autoload=1 일 때만 동작한다. 그 외에는 완전한 no-op.
+  useDevAutoload({ fmc, playerRef: fmcPlayerRef, setMode });
+  // [임시 · 검증용] ?stdview=1 일 때만 동작한다. 그 외에는 완전한 no-op.
+  useDevStdView({ fmc, playerRef: fmcPlayerRef, setMode });
 
   const onCsvChosen = (e) => {
     const files = e.target.files;
@@ -180,6 +187,26 @@ export default function App() {
               playerRef={fmcPlayerRef}
             />
             <div className="stage-tools">
+              <div className="bg-swatches" role="group" aria-label="배경색">
+                {BACKGROUND_KEYS.map((key) => (
+                  <button
+                    key={key}
+                    className={`bg-swatch${fmc.view.bg === key ? ' on' : ''}`}
+                    style={{ background: BACKGROUNDS[key].css }}
+                    onClick={() => fmc.setView((v) => ({ ...v, bg: key }))}
+                    title={`배경: ${BACKGROUNDS[key].label}`}
+                    aria-label={`배경: ${BACKGROUNDS[key].label}`}
+                    aria-pressed={fmc.view.bg === key}
+                  />
+                ))}
+              </div>
+              <button
+                className="tool-btn"
+                onClick={() => fmcPlayerRef.current?.standardView()}
+                title="눈높이·완전 정면·신호 공간 마진이 항상 같은 수어 표준 구도로 카메라를 고정합니다 (클립이 달라도 동일한 각도)"
+              >
+                수어 표준 뷰
+              </button>
               <button
                 className="tool-btn"
                 onClick={() => fmcPlayerRef.current?.resetView()}
@@ -269,8 +296,11 @@ export default function App() {
             />
             <p className="hint">
               "전체 자동 녹화"를 누르면 0번 프레임부터 끝까지 재생하며 녹화하고
-              마지막 프레임에서 자동으로 멈춰 파일로 저장합니다. 저장 전에
-              드래그로 시점을 맞춰두면 그 각도로 담깁니다.
+              마지막 프레임에서 자동으로 멈춰 파일로 저장합니다. 녹화는 화면에
+              보이는 카메라·배경을 그대로 담으므로, 여러 클립을 잘라 붙일 거라면
+              녹화 전에 "수어 표준 뷰"를 눌러 구도를 고정하세요 — 클립이 달라도
+              항상 같은 각도가 나옵니다. 크로마 그린/블루 배경 + 클린 뷰로 녹화하면
+              합성용 소스가 바로 나옵니다.
             </p>
           </aside>
         </main>
